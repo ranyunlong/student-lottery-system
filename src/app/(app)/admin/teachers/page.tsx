@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ActionForm } from '../../../../components/action-form';
 import { createTeacherAction, disableTeacherAction, resetTeacherPasswordAction, updateTeacherAction } from '../../../../features/classes/actions';
 import { listTeachers } from '../../../../features/classes/service';
@@ -13,7 +14,7 @@ export default async function TeachersPage() {
     <div className="border-b border-slate-200 pb-4"><h1 className="text-2xl font-semibold">老师账号</h1></div>
     <section className="space-y-4 border-b border-slate-200 pb-7">
       <h2 className="text-lg font-semibold">创建老师</h2>
-      <ActionForm action={createTeacherAction} label="创建账号">
+      <ActionForm action={createTeacherAction} label="创建账号" requestId={randomUUID()}>
         <label className={label}>姓名<input className={field} name="name" required /></label>
         <label className={label}>邮箱<input className={field} name="email" type="email" required /></label>
         <label className={label}>临时密码<input className={field} name="temporaryPassword" type="password" minLength={8} autoComplete="new-password" required /></label>
@@ -33,11 +34,11 @@ export default async function TeachersPage() {
             <label className={label}>邮箱<input className={field} name="email" type="email" defaultValue={teacher.email} required /></label>
           </ActionForm>
           <div className="flex flex-wrap gap-6">
-            <ActionForm action={resetTeacherPasswordAction} label="重置密码" confirm="确定重置这位老师的密码？">
+            <ActionForm action={resetTeacherPasswordAction} label="重置密码" confirm="确定重置这位老师的密码？" requestId={randomUUID()}>
               <input type="hidden" name="teacherId" value={teacher.id} />
               <label className={label}>新临时密码<input className={field} name="temporaryPassword" type="password" minLength={8} autoComplete="new-password" required /></label>
             </ActionForm>
-            {!teacher.banned && <ActionForm action={disableTeacherAction} label="停用账号" confirm="确定停用这位老师的账号？">
+            {!teacher.banned && <ActionForm action={disableTeacherAction} label="停用账号" confirm="确定停用这位老师的账号？" requestId={randomUUID()}>
               <input type="hidden" name="teacherId" value={teacher.id} />
             </ActionForm>}
           </div>

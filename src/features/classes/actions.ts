@@ -22,7 +22,7 @@ async function run(action: () => Promise<void>, success: string): Promise<Action
 }
 
 export async function createTeacherAction(data: FormData): Promise<ActionResult> {
-  return run(async () => { await createTeacher({ name: field(data, 'name'), email: field(data, 'email'), temporaryPassword: field(data, 'temporaryPassword') }); }, '老师账号已创建');
+  return run(async () => { await createTeacher({ name: field(data, 'name'), email: field(data, 'email'), temporaryPassword: field(data, 'temporaryPassword'), requestId: field(data, 'requestId') }); }, '老师账号已创建');
 }
 
 export async function updateTeacherAction(data: FormData): Promise<ActionResult> {
@@ -30,11 +30,11 @@ export async function updateTeacherAction(data: FormData): Promise<ActionResult>
 }
 
 export async function disableTeacherAction(data: FormData): Promise<ActionResult> {
-  return run(() => disableTeacher(field(data, 'teacherId')), '老师账号已停用');
+  return run(() => disableTeacher(field(data, 'teacherId'), field(data, 'requestId')), '老师账号已停用');
 }
 
 export async function resetTeacherPasswordAction(data: FormData): Promise<ActionResult> {
-  return run(() => resetTeacherPassword(field(data, 'teacherId'), field(data, 'temporaryPassword')), '临时密码已设置，请通知老师修改');
+  return run(() => resetTeacherPassword(field(data, 'teacherId'), field(data, 'temporaryPassword'), field(data, 'requestId')), '临时密码已设置，请通知老师修改');
 }
 
 export async function createClassAction(data: FormData): Promise<ActionResult> {

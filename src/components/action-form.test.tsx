@@ -18,3 +18,25 @@ test('reports a successful action and refreshes the list', async () => {
   expect(await screen.findByRole('status')).toHaveTextContent('已创建');
   await waitFor(() => expect(refresh).toHaveBeenCalled());
 });
+
+test('retains request identity for an unchanged retry and renews it when inputs change', async () => {
+  const receivedIds: string[] = [];
+  const action = vi.fn(async (data: FormData) => {
+    receivedIds.push(String(data.get('requestId')));
+    return receivedIds.length === 1
+      ? { ok: false, message: '稍后重试' }
+      : { ok: true, message: '已完成' };
+  });
+  render(<ActionForm action={action} label="提交" requestId="initial-request-id"><input name="temporaryPassword" defaultValue="First123!" /></ActionForm>);
+  const form = screen.getByRole('button', { name: '提交' }).closest('form')!;
+  fireEvent.submit(form);
+  expect(await screen.findByText('稍后重试')).toHaveAttribute('role', 'alert');
+  fireEvent.submit(form);
+  expect(await screen.findByText('已完成')).toHaveAttribute('role', 'status');
+  expect(receivedIds[1]).toBe('initial-request-id');
+
+  fireEvent.change(form.querySelector<HTMLInputElement>('[name="temporaryPassword"]')!, { target: { value: 'Second456!' } });
+  fireEvent.submit(form);
+  await waitFor(() => expect(action).toHaveBeenCalledTimes(3));
+  expect(receivedIds[2]).not.toBe('initial-request-id');
+});

@@ -12,11 +12,14 @@ import { createTeacherAction, createClassAction, assignTeacherAction, removeTeac
 let activeCookie = '';
 vi.mock('next/headers', () => ({ headers: async () => new Headers({ cookie: activeCookie }) }));
 const adminEmail = `${randomUUID()}@example.test`;
+const secondAdminEmail = `${randomUUID()}@example.test`;
 const teacherEmail = `${randomUUID()}@example.test`;
 let adminId: string;
+let secondAdminId: string;
 let teacherId: string;
 let teacherCookie: string;
 let adminCookie: string;
+let secondAdminCookie: string;
 
 async function cookieFor(email: string, password: string) {
   const response = await auth.api.signInEmail({ body: { email, password }, asResponse: true });
@@ -25,9 +28,12 @@ async function cookieFor(email: string, password: string) {
 
 beforeAll(async () => {
   adminId = (await auth.api.createUser({ body: { email: adminEmail, name: 'Admin', password: 'AdminPassword123!', role: 'admin' } })).user.id;
+  secondAdminId = (await auth.api.createUser({ body: { email: secondAdminEmail, name: 'Second Admin', password: 'SecondAdminPassword123!', role: 'admin' } })).user.id;
   teacherId = (await auth.api.createUser({ body: { email: teacherEmail, name: 'Teacher', password: 'TeacherPassword123!', role: 'user' } })).user.id;
   adminCookie = await cookieFor(adminEmail, 'AdminPassword123!');
   await auth.api.changePassword({ headers: new Headers({ cookie: adminCookie }), body: { currentPassword: 'AdminPassword123!', newPassword: 'AdminChanged123!' } });
+  secondAdminCookie = await cookieFor(secondAdminEmail, 'SecondAdminPassword123!');
+  await auth.api.changePassword({ headers: new Headers({ cookie: secondAdminCookie }), body: { currentPassword: 'SecondAdminPassword123!', newPassword: 'SecondAdminChanged123!' } });
   teacherCookie = await cookieFor(teacherEmail, 'TeacherPassword123!');
   await auth.api.changePassword({ headers: new Headers({ cookie: teacherCookie }), body: { currentPassword: 'TeacherPassword123!', newPassword: 'TeacherChanged123!' } });
   activeCookie = adminCookie;
@@ -79,6 +85,12 @@ async function rejectCredentialInsert() {
 
 async function allowCredentialInsert() {
   await db.execute(sql.raw('DELETE FROM task4_account_failure_injection'));
+}
+
+function formData(values: Record<string, string>) {
+  const data = new FormData();
+  for (const [key, value] of Object.entries(values)) data.set(key, value);
+  return data;
 }
 
 test('creates teachers and class, changes assignments and audits the authenticated actor', async () => {
@@ -141,30 +153,38 @@ test('audit insert failure prevents teacher creation and retry can use the same 
 
 test('create retry reconciles an existing account when audit finalization fails', async () => {
   const email = `${randomUUID()}@example.test`;
+  const requestId = randomUUID();
   await rejectAuditAction('teacher.create', 'UPDATE');
   try {
-    await expect(createTeacher({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!' })).rejects.toThrow();
+    const result = await createTeacherAction(formData({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!', requestId }));
+    expect(result.ok).toBe(false);
     expect((await db.select({ id: user.id }).from(user).where(eq(user.email, email)))).toHaveLength(1);
     expect((await db.select().from(adminAudit).where(eq(adminAudit.action, 'teacher.create'))).some((event) => {
       const details = event.details as { email?: string; state?: string };
       return details.email === email && details.state === 'needs_reconciliation';
     })).toBe(true);
   } finally { await allowAuditAction('teacher.create', 'UPDATE'); }
-  const retriedId = await createTeacher({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!' });
+  const retry = await createTeacherAction(formData({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!', requestId }));
+  expect(retry.ok).toBe(true);
+  const retriedId = (await db.select({ id: user.id }).from(user).where(eq(user.email, email)))[0].id;
   expect((await db.select({ id: user.id }).from(user).where(eq(user.email, email)))).toHaveLength(1);
   expect((await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, retriedId))).map((event) => (event.details as { state?: string }).state)).toContain('completed');
 });
 
 test('create retry repairs a user row left without a credential by Better Auth failure', async () => {
   const email = `${randomUUID()}@example.test`;
+  const requestId = randomUUID();
   await rejectCredentialInsert();
   try {
-    await expect(createTeacher({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!' })).rejects.toThrow();
+    const result = await createTeacherAction(formData({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!', requestId }));
+    expect(result.ok).toBe(false);
     const created = (await db.select({ id: user.id }).from(user).where(eq(user.email, email)))[0];
     expect(created).toBeTruthy();
     expect(await db.select().from(account).where(eq(account.userId, created.id))).toEqual([]);
   } finally { await allowCredentialInsert(); }
-  const retriedId = await createTeacher({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!' });
+  const retry = await createTeacherAction(formData({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!', requestId }));
+  expect(retry.ok).toBe(true);
+  const retriedId = (await db.select({ id: user.id }).from(user).where(eq(user.email, email)))[0].id;
   expect(retriedId).toBeTruthy();
   expect(await db.select().from(account).where(eq(account.userId, retriedId))).toHaveLength(1);
   await expect(auth.api.signInEmail({ body: { email, password: 'TemporaryPassword123!' } })).resolves.toBeTruthy();
@@ -190,6 +210,92 @@ test('audit insert failure prevents teacher password reset', async () => {
     expect((await db.select({ mustChangePassword: user.mustChangePassword }).from(user).where(eq(user.id, id)))[0].mustChangePassword).toBe(false);
     await expect(auth.api.signInEmail({ body: { email, password: 'OldPassword123!' } })).resolves.toBeTruthy();
   } finally { await allowAuditAction('teacher.password.reset'); }
+});
+
+test('new password reset request from another admin has a separate audit after finalization failure', async () => {
+  const email = `${randomUUID()}@example.test`;
+  const id = (await auth.api.createUser({ body: { email, name: 'Two admin reset target', password: 'OldPassword123!', role: 'user' } })).user.id;
+  const firstRequestId = randomUUID();
+  const secondRequestId = randomUUID();
+  await rejectAuditAction('teacher.password.reset', 'UPDATE');
+  try {
+    const first = await resetTeacherPasswordAction(formData({ teacherId: id, temporaryPassword: 'FirstReset123!', requestId: firstRequestId }));
+    expect(first.ok).toBe(false);
+  } finally { await allowAuditAction('teacher.password.reset', 'UPDATE'); }
+
+  activeCookie = secondAdminCookie;
+  const second = await resetTeacherPasswordAction(formData({ teacherId: id, temporaryPassword: 'SecondReset123!', requestId: secondRequestId }));
+  expect(second.ok).toBe(true);
+  const events = await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, id))
+    .orderBy(asc(adminAudit.createdAt), asc(adminAudit.id));
+  expect(events.filter((event) => event.action === 'teacher.password.reset')).toMatchObject([
+    { actorId: adminId, details: { requestId: firstRequestId, state: 'needs_reconciliation' } },
+    { actorId: secondAdminId, details: { requestId: secondRequestId, state: 'completed' } },
+  ]);
+  expect(JSON.stringify(events)).not.toContain('FirstReset123!');
+  expect(JSON.stringify(events)).not.toContain('SecondReset123!');
+  await expect(auth.api.signInEmail({ body: { email, password: 'SecondReset123!' } })).resolves.toBeTruthy();
+});
+
+test('retrying the same password reset request reconciles its original audit row', async () => {
+  const email = `${randomUUID()}@example.test`;
+  const id = (await auth.api.createUser({ body: { email, name: 'Same request target', password: 'OldPassword123!', role: 'user' } })).user.id;
+  const requestId = randomUUID();
+  const request = formData({ teacherId: id, temporaryPassword: 'SameReset123!', requestId });
+  await rejectAuditAction('teacher.password.reset', 'UPDATE');
+  try {
+    const first = await resetTeacherPasswordAction(request);
+    expect(first.ok).toBe(false);
+  } finally { await allowAuditAction('teacher.password.reset', 'UPDATE'); }
+
+  activeCookie = adminCookie;
+  const retry = await resetTeacherPasswordAction(request);
+  expect(retry.ok).toBe(true);
+  const events = await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, id))
+    .then((rows) => rows.filter((event) => event.action === 'teacher.password.reset'));
+  expect(events).toMatchObject([{ actorId: adminId, details: { requestId, state: 'completed' } }]);
+  expect(events).toHaveLength(1);
+  expect(JSON.stringify(events)).not.toContain('SameReset123!');
+});
+
+test('new teacher creation does not reconcile another admin pending create', async () => {
+  const email = `${randomUUID()}@example.test`;
+  const firstRequestId = randomUUID();
+  await rejectAuditAction('teacher.create', 'UPDATE');
+  try {
+    const first = await createTeacherAction(formData({ name: '待核查创建', email, temporaryPassword: 'FirstCreate123!', requestId: firstRequestId }));
+    expect(first.ok).toBe(false);
+  } finally { await allowAuditAction('teacher.create', 'UPDATE'); }
+
+  activeCookie = secondAdminCookie;
+  const second = await createTeacherAction(formData({ name: '待核查创建', email, temporaryPassword: 'SecondCreate123!', requestId: randomUUID() }));
+  expect(second.ok).toBe(false);
+  const events = await db.select().from(adminAudit).where(eq(adminAudit.action, 'teacher.create'));
+  const matching = events.filter((event) => (event.details as { email?: string }).email === email);
+  expect(matching).toMatchObject([{ actorId: adminId, details: { requestId: firstRequestId, state: 'needs_reconciliation' } }]);
+  expect(JSON.stringify(matching)).not.toContain('FirstCreate123!');
+  expect(JSON.stringify(matching)).not.toContain('SecondCreate123!');
+});
+
+test('new teacher disable request from another admin has a separate audit after finalization failure', async () => {
+  const id = (await auth.api.createUser({ body: { email: `${randomUUID()}@example.test`, name: 'Two admin disable target', password: 'OldPassword123!', role: 'user' } })).user.id;
+  const firstRequestId = randomUUID();
+  const secondRequestId = randomUUID();
+  await rejectAuditAction('teacher.disable', 'UPDATE');
+  try {
+    const first = await disableTeacherAction(formData({ teacherId: id, requestId: firstRequestId }));
+    expect(first.ok).toBe(false);
+  } finally { await allowAuditAction('teacher.disable', 'UPDATE'); }
+
+  activeCookie = secondAdminCookie;
+  const second = await disableTeacherAction(formData({ teacherId: id, requestId: secondRequestId }));
+  expect(second.ok).toBe(true);
+  const events = await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, id))
+    .orderBy(asc(adminAudit.createdAt), asc(adminAudit.id));
+  expect(events.filter((event) => event.action === 'teacher.disable')).toMatchObject([
+    { actorId: adminId, details: { requestId: firstRequestId, state: 'needs_reconciliation' } },
+    { actorId: secondAdminId, details: { requestId: secondRequestId, state: 'completed' } },
+  ]);
 });
 
 test('archived class immediately denies an existing teacher session but preserves admin history access', async () => {
