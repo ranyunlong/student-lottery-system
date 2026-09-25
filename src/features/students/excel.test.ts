@@ -74,6 +74,39 @@ test('reports physical blank data rows but ignores trailing blank styled rows', 
   ]);
 });
 
+test('ignores trailing empty-string and whitespace cells after the last student', async () => {
+  const bytes = await xlsx((_, sheet) => {
+    sheet.getRow(2).values = ['001', '甲', '男'];
+    sheet.getCell('A3').value = '';
+    sheet.getCell('B4').value = '   ';
+  });
+  const loaded = new ExcelJS.Workbook();
+  await loaded.xlsx.load(Uint8Array.from(bytes).buffer);
+  expect(loaded.getWorksheet(1)!.getCell('A3').value).toBe('');
+  expect(loaded.getWorksheet(1)!.getCell('B4').value).toBe('   ');
+  expect(await parseExcelStudents(bytes)).toEqual({
+    rows: [{ studentNumber: '001', name: '甲', gender: 'male' }],
+    errors: [],
+  });
+});
+
+test('reports a whitespace-only middle row but ignores blank text after the last student', async () => {
+  const bytes = await xlsx((_, sheet) => {
+    sheet.getRow(2).values = ['001', '甲', '男'];
+    sheet.getCell('A3').value = '';
+    sheet.getCell('B3').value = '  ';
+    sheet.getRow(4).values = ['002', '乙', '女'];
+    sheet.getCell('C5').value = ' ';
+  });
+  const loaded = new ExcelJS.Workbook();
+  await loaded.xlsx.load(Uint8Array.from(bytes).buffer);
+  expect(loaded.getWorksheet(1)!.getCell('B3').value).toBe('  ');
+  expect((await parseExcelStudents(bytes)).errors).toEqual([
+    { line: 3, message: '学号必填' },
+    { line: 3, message: '姓名必填' },
+  ]);
+});
+
 test('rejects a distant valued row before iterating through the blank physical range', async () => {
   const bytes = await xlsx((_, sheet) => { sheet.getRow(900000).values = ['001', '甲', '男']; });
   const preview = await parseExcelStudents(bytes);

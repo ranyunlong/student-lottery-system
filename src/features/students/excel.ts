@@ -110,7 +110,12 @@ export async function parseExcelStudents(bytes: Uint8Array): Promise<ImportPrevi
   const seen = new Set<string>();
   let lastDataLine = 1;
   sheet.eachRow((row, line) => {
-    if (line > lastDataLine) lastDataLine = line;
+    let hasContent = false;
+    row.eachCell((cell) => {
+      const { text, error } = cellText(cell);
+      if (error || text.trim()) hasContent = true;
+    });
+    if (hasContent) lastDataLine = line;
   });
   if (lastDataLine > MAX_STUDENT_ROWS + 1) {
     preview.errors.push({ line: lastDataLine, message: '数据行不能超过 5,000 行' });
