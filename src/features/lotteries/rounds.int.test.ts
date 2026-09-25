@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
+import { revalidatePath } from 'next/cache';
 import { db, pool } from '../../db/client';
 import { classes, classTeachers, lotteryRounds, prizes, sessionPrizes, sessionStudents, stockEvents, students, winningRecords } from '../../db/schema';
 import { auth } from '../../lib/auth';
@@ -180,6 +181,88 @@ test('server actions use the current login and return persisted start and stop r
   const stopped = await stopRoundAction(stop);
   expect(stopped).toMatchObject({ ok: true, result: { studentId: f.a.id, prizeId: f.prize.id } });
   expect(await cancelRoundAction(stop)).toMatchObject({ ok: false });
+});
+
+test('start action reports its committed round when cache invalidation fails', async () => {
+  const f = await fixture(1);
+  const sessionId = await modeOne(f, 1, 1);
+  const data = new FormData(); data.set('sessionId', sessionId); data.set('selectedStudentId', String(f.a.id));
+  vi.mocked(revalidatePath).mockImplementationOnce(() => { throw new Error('cache unavailable'); });
+  try {
+    const response = await startRoundAction(data);
+    expect(response).toMatchObject({ ok: true, roundId: expect.any(String), token: expect.any(String) });
+    const [round] = await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId));
+    expect(round).toMatchObject({ id: response.ok ? response.roundId : '', status: 'active' });
+    expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, round.id))).toEqual([]);
+  } finally { vi.mocked(revalidatePath).mockReset(); }
+});
+
+test('stop action returns the committed draw result when cache invalidation fails', async () => {
+  const f = await fixture(1);
+  const sessionId = await modeOne(f, 1, 1);
+  const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
+  const data = new FormData(); data.set('token', token);
+  vi.mocked(revalidatePath).mockImplementationOnce(() => { throw new Error('cache unavailable'); });
+  try {
+    const response = await stopRoundAction(data);
+    const [record] = await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId));
+    expect(response).toEqual({ ok: true, result: { winId: record.id, studentId: f.a.id, studentName: '甲', prizeId: f.prize.id, prizeName: '奖品' } });
+    expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
+    expect(await db.select().from(stockEvents).where(eq(stockEvents.winningRecordId, record.id))).toHaveLength(1);
+  } finally { vi.mocked(revalidatePath).mockReset(); }
+});
+
+test('cancel action reports success after cancellation despite cache invalidation failure', async () => {
+  const f = await fixture(1);
+  const sessionId = await modeOne(f, 1, 1);
+  const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
+  const data = new FormData(); data.set('token', token);
+  vi.mocked(revalidatePath).mockImplementationOnce(() => { throw new Error('cache unavailable'); });
+  try {
+    expect(await cancelRoundAction(data)).toEqual({ ok: true });
+    expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.id, roundId)))[0].status).toBe('cancelled');
+    expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
+  } finally { vi.mocked(revalidatePath).mockReset(); }
+});
+
+test('action authorization failures remain failures and do not reveal a draw result', async () => {
+  const f = await fixture(1);
+  const sessionId = await modeOne(f, 1, 1);
+  const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
+  await db.delete(classTeachers).where(and(eq(classTeachers.classId, f.classId), eq(classTeachers.teacherId, teacherId)));
+  const data = new FormData(); data.set('token', token);
+  const start = new FormData(); start.set('sessionId', sessionId); start.set('selectedStudentId', String(f.a.id));
+  expect(await startRoundAction(start)).toEqual({ ok: false, message: expect.any(String) });
+  expect(await stopRoundAction(data)).toEqual({ ok: false, message: expect.any(String) });
+  expect(await cancelRoundAction(data)).toEqual({ ok: false, message: expect.any(String) });
+  expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
+});
+
+test('ledger insert failure rolls back the win, stock, counters and round completion', async () => {
+  const f = await fixture(1);
+  const sessionId = await modeOne(f, 1, 1);
+  const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
+  const name = 'task11_fail_' + randomUUID().replaceAll('-', '');
+  await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.prize_id = '${f.prize.id}'::uuid THEN RAISE EXCEPTION 'task11 ledger insert failed'; END IF;
+      RETURN NEW;
+    END $$`);
+  try {
+    await pool.query(`CREATE TRIGGER ${name} BEFORE INSERT ON stock_events FOR EACH ROW EXECUTE FUNCTION ${name}()`);
+    await expect(stopRound(token, teacherId)).rejects.toMatchObject({ cause: { message: expect.stringContaining('task11 ledger insert failed') } });
+    const data = new FormData(); data.set('token', token);
+    expect(await stopRoundAction(data)).toEqual({ ok: false, message: '操作失败，请重试' });
+    expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
+    expect(await db.select().from(stockEvents).where(eq(stockEvents.prizeId, f.prize.id))).toEqual([]);
+    expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(1);
+    expect((await db.select().from(sessionStudents).where(and(eq(sessionStudents.sessionId, sessionId), eq(sessionStudents.studentId, f.a.id))))[0].usedCount).toBe(0);
+    expect((await db.select().from(sessionPrizes).where(and(eq(sessionPrizes.sessionId, sessionId), eq(sessionPrizes.prizeId, f.prize.id))))[0].usedCount).toBe(0);
+    expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.id, roundId)))[0]).toMatchObject({ status: 'active', stoppedAt: null, stopToken: null });
+  } finally {
+    await pool.query(`DROP TRIGGER IF EXISTS ${name} ON stock_events`);
+    await pool.query(`DROP FUNCTION IF EXISTS ${name}()`);
+  }
 });
 
 test('stop waiting on class lock sees revocation committed before it enters the transaction', async () => {
