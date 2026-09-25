@@ -11,7 +11,7 @@ export function AppShell({ role, children }: { role: 'admin' | 'teacher'; childr
   const pathname = usePathname();
   const router = useRouter();
   const links = role === 'admin'
-    ? [{ href: '/admin/teachers', label: '老师账号' }, { href: '/admin/classes', label: '班级管理' }]
+    ? [{ href: '/admin/teachers', label: '老师账号' }, { href: '/admin/classes', label: '班级管理' }, { href: '/admin/audit', label: '审计记录' }]
     : [{ href: '/teacher', label: '我的班级' }];
 
   async function signOut() {
