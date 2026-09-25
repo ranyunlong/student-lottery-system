@@ -1,4 +1,5 @@
 import Image from 'next/image';
+import Link from 'next/link';
 import { ActionForm } from '../../../../components/action-form';
 import { archiveClassAction, assignTeacherAction, createClassAction, removeTeacherAction, updateClassAction, uploadEmblemAction } from '../../../../features/classes/actions';
 import { listAdminAudit, listClasses, listTeachers } from '../../../../features/classes/service';
@@ -32,8 +33,9 @@ export default async function ClassesPage() {
       <h2 className="text-lg font-semibold">全部班级</h2>
       {grouped.size ? <ul className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
         {[...grouped].map(([id, item]) => <li key={id} className="space-y-4 px-4 py-5">
-          <div className="flex items-center gap-3"><h3 className="font-semibold">{item.name}</h3>
+          <div className="flex flex-wrap items-center gap-3"><h3 className="font-semibold">{item.name}</h3>
             {item.archived && <span className="text-xs text-slate-500">已归档</span>}</div>
+          {!item.archived && <Link href={'/classes/' + id + '/students'} className="inline-block text-sm font-medium text-teal-800 hover:underline focus-visible:outline-2 focus-visible:outline-teal-700">查看学生名单</Link>}
           <div className="flex flex-wrap items-center gap-4">
             {item.emblemPath && <Image unoptimized width={64} height={64} alt={`${item.name}班徽`}
               src={`/api/classes/${id}/emblem?v=${encodeURIComponent(item.emblemPath)}`}
