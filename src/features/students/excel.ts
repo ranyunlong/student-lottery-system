@@ -1,8 +1,60 @@
 import ExcelJS from 'exceljs';
+import yauzl, { type Entry, type ZipFile } from 'yauzl';
+import type { Readable } from 'node:stream';
 import { appendStudentRow, MAX_STUDENT_ROWS, type ImportPreview } from './parse';
 
 const MAX_EXCEL_BYTES = 5 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 256;
+const MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 const headers = ['学号', '姓名', '性别'];
+
+class ZipLimitError extends Error {}
+
+async function validateZipLimits(bytes: Uint8Array): Promise<void> {
+  const zip = await new Promise<ZipFile>((resolve, reject) => {
+    yauzl.fromBuffer(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      { lazyEntries: true, validateEntrySizes: true },
+      (error, file) => error ? reject(error) : resolve(file));
+  });
+  if (zip.entryCount > MAX_ZIP_ENTRIES) throw new ZipLimitError('ZIP 条目不能超过 256 个');
+
+  const entries = await new Promise<Entry[]>((resolve, reject) => {
+    const found: Entry[] = [];
+    let declaredBytes = 0;
+    zip.once('error', reject);
+    zip.once('end', () => resolve(found));
+    zip.on('entry', (entry: Entry) => {
+      if (entry.isEncrypted() || ![0, 8].includes(entry.compressionMethod)) {
+        reject(new Error('Unsupported ZIP entry'));
+        return;
+      }
+      declaredBytes += entry.uncompressedSize;
+      if (!Number.isSafeInteger(declaredBytes) || declaredBytes > MAX_UNCOMPRESSED_BYTES) {
+        reject(new ZipLimitError('Excel 解压内容不能超过 32 MiB'));
+        return;
+      }
+      found.push(entry);
+      zip.readEntry();
+    });
+    zip.readEntry();
+  });
+
+  let actualBytes = 0;
+  for (const entry of entries) {
+    const stream = await new Promise<Readable>((resolve, reject) => {
+      zip.openReadStream(entry, (error, opened) => error ? reject(error) : resolve(opened));
+    });
+    let entryBytes = 0;
+    for await (const chunk of stream) {
+      entryBytes += (chunk as Buffer).byteLength;
+      actualBytes += (chunk as Buffer).byteLength;
+      if (entryBytes > entry.uncompressedSize || actualBytes > MAX_UNCOMPRESSED_BYTES) {
+        throw new ZipLimitError('Excel 解压内容不能超过 32 MiB');
+      }
+    }
+    if (entryBytes !== entry.uncompressedSize) throw new Error('ZIP entry size mismatch');
+  }
+}
 
 function cellText(cell: ExcelJS.Cell): { text: string; error?: string } {
   if (cell.type === ExcelJS.ValueType.Null) return { text: '' };
@@ -28,6 +80,13 @@ export async function parseExcelStudents(bytes: Uint8Array): Promise<ImportPrevi
     return preview;
   }
 
+  try {
+    await validateZipLimits(bytes);
+  } catch (error) {
+    preview.errors.push({ line: 0, message: error instanceof ZipLimitError ? error.message : 'Excel 文件内容无效' });
+    return preview;
+  }
+
   const workbook = new ExcelJS.Workbook();
   try {
     await workbook.xlsx.load(Uint8Array.from(bytes).buffer);
@@ -49,13 +108,15 @@ export async function parseExcelStudents(bytes: Uint8Array): Promise<ImportPrevi
   }
 
   const seen = new Set<string>();
-  let count = 0;
+  let lastDataLine = 1;
   sheet.eachRow((row, line) => {
-    if (line === 1) return;
-    count++;
-    if (count === MAX_STUDENT_ROWS + 1) {
-      preview.errors.push({ line, message: '数据行不能超过 5,000 行' });
-    }
+    if (line > lastDataLine) lastDataLine = line;
+  });
+  if (lastDataLine > MAX_STUDENT_ROWS + 1) {
+    preview.errors.push({ line: lastDataLine, message: '数据行不能超过 5,000 行' });
+  }
+  for (let line = 2; line <= Math.min(lastDataLine, MAX_STUDENT_ROWS + 1); line++) {
+    const row = sheet.getRow(line);
     const values = [1, 2, 3].map((column) => cellText(row.getCell(column)));
     const cellErrors = values.flatMap(({ error }) => error ? [error] : []);
     const rowValues = row.values;
@@ -63,6 +124,6 @@ export async function parseExcelStudents(bytes: Uint8Array): Promise<ImportPrevi
       cellErrors.push('只能填写学号、姓名、性别三列');
     }
     appendStudentRow(preview, seen, values.map(({ text }) => text), line, cellErrors);
-  });
+  }
   return preview;
 }
