@@ -1,7 +1,7 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import { db } from '../../db/client';
-import { user } from '../../db/auth-schema';
+import { account, user } from '../../db/auth-schema';
 import { adminAudit, classes, classTeachers } from '../../db/schema';
 import { requireAdmin, requireSession, ForbiddenError } from '../../lib/access';
 import { auth } from '../../lib/auth';
@@ -17,16 +17,82 @@ async function teacherOrThrow(id: string) {
   if (!teacher || teacher.role !== 'user') throw new Error('老师不存在');
 }
 
+type AccountAuditDetails = Record<string, unknown>;
+
+async function findPendingAccountAudit(action: string, target: { email?: string; name?: string; userId?: string }) {
+  const conditions = [
+    eq(adminAudit.action, action),
+    sql`${adminAudit.details}->>'state' in ('pending', 'needs_reconciliation')`,
+  ];
+  if (target.email) conditions.push(sql`${adminAudit.details}->>'email' = ${target.email}`);
+  if (target.name) conditions.push(sql`${adminAudit.details}->>'name' = ${target.name}`);
+  if (target.userId) conditions.push(eq(adminAudit.targetUserId, target.userId));
+  const [entry] = await db.select({ id: adminAudit.id, details: adminAudit.details })
+    .from(adminAudit).where(and(...conditions)).orderBy(desc(adminAudit.createdAt)).limit(1);
+  return entry;
+}
+
+async function startAccountAudit(actorId: string, action: string, targetUserId: string | null, details: AccountAuditDetails) {
+  const [entry] = await db.insert(adminAudit).values({
+    actorId, targetUserId, action, details: { ...details, state: 'pending' },
+  }).returning({ id: adminAudit.id });
+  return entry.id;
+}
+
+async function setAccountAuditState(id: string, state: 'pending' | 'completed' | 'needs_reconciliation', details: AccountAuditDetails, targetUserId?: string) {
+  const updated = await db.update(adminAudit).set({
+    ...(targetUserId ? { targetUserId } : {}),
+    details: { ...details, state },
+  }).where(eq(adminAudit.id, id)).returning({ id: adminAudit.id });
+  if (!updated.length) throw new Error('管理审计记录不存在');
+}
+
+async function performAuditedAccountChange<T>(id: string, details: AccountAuditDetails, change: () => Promise<T>, targetUserId?: (result: T) => string) {
+  try {
+    const result = await change();
+    await setAccountAuditState(id, 'completed', details, targetUserId?.(result));
+    return result;
+  } catch (operationError) {
+    try {
+      await setAccountAuditState(id, 'needs_reconciliation', details);
+    } catch (auditError) {
+      throw new AggregateError([operationError, auditError], '账号操作或审计状态写入失败，需核查待处理记录');
+    }
+    throw operationError;
+  }
+}
+
 export async function createTeacher(input: { name: string; email: string; temporaryPassword: string }): Promise<string> {
   const actorId = await requireAdmin();
   const name = required(input.name, '姓名');
   const email = required(input.email, '邮箱').toLowerCase();
   const password = required(input.temporaryPassword, '临时密码');
-  const [existing] = await db.select({ id: user.id }).from(user).where(eq(user.email, email)).limit(1);
+  const action = 'teacher.create';
+  const pending = await findPendingAccountAudit(action, { email, name });
+  const [existing] = await db.select({ id: user.id, name: user.name, role: user.role }).from(user).where(eq(user.email, email)).limit(1);
+  if (pending && existing) {
+    if (existing.role !== 'user') throw new Error('邮箱对应的账号不是老师');
+    const details = (pending.details ?? { name, email }) as AccountAuditDetails;
+    if (existing.name !== name) throw new Error('该邮箱有待核查的老师创建记录，请先处理该记录');
+    const [credential] = await db.select({ id: account.id, password: account.password }).from(account)
+      .where(and(eq(account.userId, existing.id), eq(account.providerId, 'credential'))).limit(1);
+    if (!credential?.password) {
+      return performAuditedAccountChange(pending.id, details, async () => {
+        await auth.api.setUserPassword({ headers: await headers(), body: { userId: existing.id, newPassword: password } });
+        return existing.id;
+      }, (id) => id);
+    }
+    await setAccountAuditState(pending.id, 'completed', details, existing.id);
+    return existing.id;
+  }
   if (existing) throw new Error('邮箱已存在');
-  const created = await auth.api.createUser({ headers: await headers(), body: { name, email, password, role: 'user' } });
-  await db.insert(adminAudit).values({ actorId, targetUserId: created.user.id, action: 'teacher.create', details: { name, email } });
-  return created.user.id;
+  const details = { name, email };
+  const auditId = pending?.id ?? await startAccountAudit(actorId, action, null, details);
+  const auditDetails = (pending?.details ?? details) as AccountAuditDetails;
+  return performAuditedAccountChange(auditId, auditDetails, async () => {
+    const created = await auth.api.createUser({ headers: await headers(), body: { name, email, password, role: 'user' } });
+    return created.user.id;
+  }, (id) => id);
 }
 
 export async function updateTeacher(id: string, input: { name: string; email: string }): Promise<void> {
@@ -46,16 +112,26 @@ export async function updateTeacher(id: string, input: { name: string; email: st
 export async function disableTeacher(id: string): Promise<void> {
   const actorId = await requireAdmin();
   await teacherOrThrow(id);
-  await auth.api.banUser({ headers: await headers(), body: { userId: id } });
-  await db.insert(adminAudit).values({ actorId, targetUserId: id, action: 'teacher.disable' });
+  const action = 'teacher.disable';
+  const pending = await findPendingAccountAudit(action, { userId: id });
+  const details = (pending?.details ?? {}) as AccountAuditDetails;
+  const auditId = pending?.id ?? await startAccountAudit(actorId, action, id, details);
+  await performAuditedAccountChange(auditId, details, async () => {
+    await auth.api.banUser({ headers: await headers(), body: { userId: id } });
+  });
 }
 
 export async function resetTeacherPassword(id: string, temporaryPassword: string): Promise<void> {
   const actorId = await requireAdmin();
   await teacherOrThrow(id);
   const password = required(temporaryPassword, '临时密码');
-  await auth.api.setUserPassword({ headers: await headers(), body: { userId: id, newPassword: password } });
-  await db.insert(adminAudit).values({ actorId, targetUserId: id, action: 'teacher.password.reset' });
+  const action = 'teacher.password.reset';
+  const pending = await findPendingAccountAudit(action, { userId: id });
+  const details = (pending?.details ?? {}) as AccountAuditDetails;
+  const auditId = pending?.id ?? await startAccountAudit(actorId, action, id, details);
+  await performAuditedAccountChange(auditId, details, async () => {
+    await auth.api.setUserPassword({ headers: await headers(), body: { userId: id, newPassword: password } });
+  });
 }
 
 export async function createClass(nameInput: string): Promise<string> {

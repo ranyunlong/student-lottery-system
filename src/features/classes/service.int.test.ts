@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { asc, eq } from 'drizzle-orm';
+import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest';
+import { asc, eq, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
-import { user } from '../../db/auth-schema';
+import { account, user } from '../../db/auth-schema';
 import { adminAudit, classes } from '../../db/schema';
 import { auth } from '../../lib/auth';
+import { requireClassAccess } from '../../lib/access';
 import { createTeacher, createClass, assignTeacher, removeTeacher, listClassTeacherIds, archiveClass, updateClass, updateTeacher, disableTeacher, resetTeacherPassword, listTeachers, listClasses, listTeacherClasses, listAdminAudit } from './service';
 import { createTeacherAction, createClassAction, assignTeacherAction, removeTeacherAction, archiveClassAction, updateClassAction, updateTeacherAction, disableTeacherAction, resetTeacherPasswordAction } from './actions';
 
@@ -30,8 +31,55 @@ beforeAll(async () => {
   teacherCookie = await cookieFor(teacherEmail, 'TeacherPassword123!');
   await auth.api.changePassword({ headers: new Headers({ cookie: teacherCookie }), body: { currentPassword: 'TeacherPassword123!', newPassword: 'TeacherChanged123!' } });
   activeCookie = adminCookie;
+  await db.execute(sql.raw('CREATE TABLE task4_audit_failure_injection (action text, operation text, PRIMARY KEY (action, operation))'));
+  await db.execute(sql.raw('CREATE TABLE task4_account_failure_injection (operation text PRIMARY KEY)'));
+  await db.execute(sql.raw(`CREATE FUNCTION task4_reject_admin_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM task4_audit_failure_injection WHERE action = NEW.action AND operation = TG_OP)
+        AND NOT (TG_OP = 'UPDATE' AND NEW.details->>'state' = 'needs_reconciliation') THEN
+        RAISE EXCEPTION 'injected admin audit failure for %', NEW.action;
+      END IF;
+      RETURN NEW;
+    END;
+  $$`));
+  await db.execute(sql.raw('CREATE TRIGGER task4_reject_admin_audit BEFORE INSERT OR UPDATE ON admin_audit FOR EACH ROW EXECUTE FUNCTION task4_reject_admin_audit()'));
+  await db.execute(sql.raw(`CREATE FUNCTION task4_reject_account_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM task4_account_failure_injection WHERE operation = TG_OP) THEN
+        RAISE EXCEPTION 'injected account credential failure';
+      END IF;
+      RETURN NEW;
+    END;
+  $$`));
+  await db.execute(sql.raw("CREATE TRIGGER task4_reject_account_insert BEFORE INSERT ON account FOR EACH ROW WHEN (NEW.provider_id = 'credential') EXECUTE FUNCTION task4_reject_account_insert()"));
 });
-afterAll(async () => { await pool.end(); });
+afterAll(async () => {
+  await db.execute(sql.raw('DROP TRIGGER task4_reject_account_insert ON account'));
+  await db.execute(sql.raw('DROP FUNCTION task4_reject_account_insert()'));
+  await db.execute(sql.raw('DROP TABLE task4_account_failure_injection'));
+  await db.execute(sql.raw('DROP TRIGGER task4_reject_admin_audit ON admin_audit'));
+  await db.execute(sql.raw('DROP FUNCTION task4_reject_admin_audit()'));
+  await db.execute(sql.raw('DROP TABLE task4_audit_failure_injection'));
+  await pool.end();
+});
+afterEach(() => { activeCookie = adminCookie; });
+
+async function rejectAuditAction(action: string, operation = 'INSERT') {
+  await db.execute(sql`INSERT INTO task4_audit_failure_injection (action, operation) VALUES (${action}, ${operation})`);
+}
+
+async function allowAuditAction(action: string, operation?: string) {
+  if (operation) await db.execute(sql`DELETE FROM task4_audit_failure_injection WHERE action = ${action} AND operation = ${operation}`);
+  else await db.execute(sql`DELETE FROM task4_audit_failure_injection WHERE action = ${action}`);
+}
+
+async function rejectCredentialInsert() {
+  await db.execute(sql.raw("INSERT INTO task4_account_failure_injection (operation) VALUES ('INSERT')"));
+}
+
+async function allowCredentialInsert() {
+  await db.execute(sql.raw('DELETE FROM task4_account_failure_injection'));
+}
 
 test('creates teachers and class, changes assignments and audits the authenticated actor', async () => {
   const email = `${randomUUID()}@example.test`;
@@ -78,6 +126,95 @@ test('updates, disables and resets teacher while retaining class history and aud
   expect(events.map((e) => e.action)).toEqual(['teacher.create', 'class.teacher.assign', 'teacher.update', 'teacher.password.reset', 'teacher.disable']);
   expect(events.every((e) => e.actorId === adminId && e.createdAt instanceof Date)).toBe(true);
   expect(JSON.stringify(events)).not.toContain('ResetPassword123!');
+});
+
+test('audit insert failure prevents teacher creation and retry can use the same email', async () => {
+  const email = `${randomUUID()}@example.test`;
+  await rejectAuditAction('teacher.create');
+  try {
+    await expect(createTeacher({ name: '审计失败', email, temporaryPassword: 'TemporaryPassword123!' })).rejects.toThrow();
+    expect(await db.select({ id: user.id }).from(user).where(eq(user.email, email))).toEqual([]);
+  } finally { await allowAuditAction('teacher.create'); }
+  const id = await createTeacher({ name: '审计恢复', email, temporaryPassword: 'TemporaryPassword123!' });
+  expect((await db.select().from(user).where(eq(user.id, id)))[0].email).toBe(email);
+});
+
+test('create retry reconciles an existing account when audit finalization fails', async () => {
+  const email = `${randomUUID()}@example.test`;
+  await rejectAuditAction('teacher.create', 'UPDATE');
+  try {
+    await expect(createTeacher({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!' })).rejects.toThrow();
+    expect((await db.select({ id: user.id }).from(user).where(eq(user.email, email)))).toHaveLength(1);
+    expect((await db.select().from(adminAudit).where(eq(adminAudit.action, 'teacher.create'))).some((event) => {
+      const details = event.details as { email?: string; state?: string };
+      return details.email === email && details.state === 'needs_reconciliation';
+    })).toBe(true);
+  } finally { await allowAuditAction('teacher.create', 'UPDATE'); }
+  const retriedId = await createTeacher({ name: '创建后审计失败', email, temporaryPassword: 'TemporaryPassword123!' });
+  expect((await db.select({ id: user.id }).from(user).where(eq(user.email, email)))).toHaveLength(1);
+  expect((await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, retriedId))).map((event) => (event.details as { state?: string }).state)).toContain('completed');
+});
+
+test('create retry repairs a user row left without a credential by Better Auth failure', async () => {
+  const email = `${randomUUID()}@example.test`;
+  await rejectCredentialInsert();
+  try {
+    await expect(createTeacher({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!' })).rejects.toThrow();
+    const created = (await db.select({ id: user.id }).from(user).where(eq(user.email, email)))[0];
+    expect(created).toBeTruthy();
+    expect(await db.select().from(account).where(eq(account.userId, created.id))).toEqual([]);
+  } finally { await allowCredentialInsert(); }
+  const retriedId = await createTeacher({ name: '部分创建', email, temporaryPassword: 'TemporaryPassword123!' });
+  expect(retriedId).toBeTruthy();
+  expect(await db.select().from(account).where(eq(account.userId, retriedId))).toHaveLength(1);
+  await expect(auth.api.signInEmail({ body: { email, password: 'TemporaryPassword123!' } })).resolves.toBeTruthy();
+});
+
+test('audit insert failure prevents teacher disable', async () => {
+  const id = (await auth.api.createUser({ body: { email: `${randomUUID()}@example.test`, name: 'Disable target', password: 'OldPassword123!', role: 'user' } })).user.id;
+  await rejectAuditAction('teacher.disable');
+  try {
+    await expect(disableTeacher(id)).rejects.toThrow();
+    expect((await db.select({ banned: user.banned }).from(user).where(eq(user.id, id)))[0].banned).toBe(false);
+  } finally { await allowAuditAction('teacher.disable'); }
+});
+
+test('audit insert failure prevents teacher password reset', async () => {
+  const email = `${randomUUID()}@example.test`;
+  await auth.api.createUser({ body: { email, name: 'Reset target', password: 'OldPassword123!', role: 'user' } });
+  const id = (await db.select({ id: user.id }).from(user).where(eq(user.email, email)))[0].id;
+  await db.update(user).set({ mustChangePassword: false }).where(eq(user.id, id));
+  await rejectAuditAction('teacher.password.reset');
+  try {
+    await expect(resetTeacherPassword(id, 'NewPassword123!')).rejects.toThrow();
+    expect((await db.select({ mustChangePassword: user.mustChangePassword }).from(user).where(eq(user.id, id)))[0].mustChangePassword).toBe(false);
+    await expect(auth.api.signInEmail({ body: { email, password: 'OldPassword123!' } })).resolves.toBeTruthy();
+  } finally { await allowAuditAction('teacher.password.reset'); }
+});
+
+test('archived class immediately denies an existing teacher session but preserves admin history access', async () => {
+  const classId = await createClass('归档前可访问');
+  await assignTeacher(classId, teacherId);
+  activeCookie = teacherCookie;
+  expect(await requireClassAccess(classId)).toBe(teacherId);
+  activeCookie = adminCookie;
+  await archiveClass(classId);
+  activeCookie = teacherCookie;
+  await expect(requireClassAccess(classId)).rejects.toThrow('无权访问班级');
+  activeCookie = adminCookie;
+  expect(await requireClassAccess(classId)).toBe(adminId);
+});
+
+test('removing a teacher immediately revokes their existing session access', async () => {
+  const classId = await createClass('移除教师班');
+  await assignTeacher(classId, teacherId);
+  activeCookie = teacherCookie;
+  expect(await requireClassAccess(classId)).toBe(teacherId);
+  activeCookie = adminCookie;
+  await removeTeacher(classId, teacherId);
+  activeCookie = teacherCookie;
+  await expect(requireClassAccess(classId)).rejects.toThrow('无权访问班级');
+  activeCookie = adminCookie;
 });
 
 test('teacher cannot call any administrator service or action including reads', async () => {

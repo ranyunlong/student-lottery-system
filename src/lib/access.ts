@@ -14,10 +14,11 @@ export async function checkClassAccess(userId: string, classId: string): Promise
     .from(user).where(eq(user.id, userId)).limit(1);
   if (!identity || identity.banned) throw new ForbiddenError('账号不可用');
   if (identity.mustChangePassword) throw new ForbiddenError('请先修改密码');
-  const [target] = await db.select({ id: classes.id }).from(classes).where(eq(classes.id, classId)).limit(1);
+  const [target] = await db.select({ id: classes.id, archived: classes.archived }).from(classes).where(eq(classes.id, classId)).limit(1);
   if (!target) throw new ForbiddenError();
   if (identity.role === 'admin') return;
   if (identity.role !== 'user') throw new ForbiddenError();
+  if (target.archived) throw new ForbiddenError('无权访问班级');
   const [membership] = await db.select({ classId: classTeachers.classId }).from(classTeachers)
     .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, userId))).limit(1);
   if (!membership) throw new ForbiddenError();

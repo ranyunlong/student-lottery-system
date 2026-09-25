@@ -74,6 +74,16 @@ export default async function ClassesPage() {
         {audit.map((event) => <li key={event.id} className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3">
           <time dateTime={event.createdAt.toISOString()} className="text-slate-500">{event.createdAt.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</time>
           <span className="font-medium">{actionLabels[event.action] ?? event.action}</span>
+          {(() => {
+            const state = (event.details as { state?: string } | null)?.state;
+            if (state === 'pending') return <span className="text-amber-800">处理中</span>;
+            if (state === 'needs_reconciliation') return <span className="text-red-700">需核查</span>;
+            return null;
+          })()}
+          {(() => {
+            const email = (event.details as { email?: string } | null)?.email;
+            return email ? <span className="break-all text-slate-500">邮箱 {email}</span> : null;
+          })()}
           <span className="break-all text-slate-500">操作人 {event.actorId}</span>
           {(event.classId || event.targetUserId) && <span className="break-all text-slate-500">对象 {event.classId ?? event.targetUserId}</span>}
         </li>)}
