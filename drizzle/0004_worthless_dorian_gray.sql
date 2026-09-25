@@ -1,0 +1,2 @@
+CREATE INDEX "classes_emblem_path_idx" ON "classes" USING btree ("emblem_path");--> statement-breakpoint
+CREATE INDEX "emblem_cleanup_retry_idx" ON "emblem_cleanup" USING btree ("attempts","created_at","storage_name");

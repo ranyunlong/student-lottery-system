@@ -12,8 +12,8 @@ import { uploadEmblemAction } from './actions';
 const state = vi.hoisted(() => ({ emblemPath: null as string | null, allowed: true, adminAllowed: true }));
 vi.mock('../../db/client', () => {
   const fakeDb = {
-    select: (fields: { id?: unknown; storageName?: unknown }) => ({ from: () => fields.storageName ? Promise.resolve([]) : ({ where: () => ({
-      for: async () => [{ emblemPath: state.emblemPath }],
+    select: (fields: { id?: unknown; storageName?: unknown }) => ({ from: () => ({ where: () => ({
+      for: async () => fields.storageName ? [] : [{ emblemPath: state.emblemPath }],
       limit: async () => fields.id ? [] : [{ emblemPath: state.emblemPath }],
     }) }) }),
     insert: () => ({ values: () => ({ onConflictDoNothing: async () => {} }) }),

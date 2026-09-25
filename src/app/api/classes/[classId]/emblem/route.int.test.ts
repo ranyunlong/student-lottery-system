@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
@@ -7,14 +8,17 @@ import sharp from 'sharp';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { db, pool } from '../../../../../db/client';
 import { classes, classTeachers, emblemCleanup } from '../../../../../db/schema';
-import { saveEmblem } from '../../../../../features/classes/emblem';
+import { runEmblemCleanupBatch, saveEmblem } from '../../../../../features/classes/emblem';
 import { auth } from '../../../../../lib/auth';
 import { GET, POST } from './route';
 
 let activeCookie = '';
 vi.mock('next/headers', () => ({ headers: async () => new Headers({ cookie: activeCookie }) }));
 const readGate = vi.hoisted(() => ({ wait: null as Promise<void> | null, entered: null as (() => void) | null }));
-const cleanupFaults = vi.hoisted(() => ({ unlinkName: null as string | null }));
+const cleanupFaults = vi.hoisted(() => ({
+  unlinkName: null as string | null,
+  backlogNames: new Set<string>(),
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return { ...real, readFile: async (...args: Parameters<typeof real.readFile>) => {
@@ -24,7 +28,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     }
     return real.readFile(...args);
   }, unlink: async (...args: Parameters<typeof real.unlink>) => {
-    if (cleanupFaults.unlinkName && String(args[0]).endsWith(cleanupFaults.unlinkName)) {
+    if ((cleanupFaults.unlinkName && String(args[0]).endsWith(cleanupFaults.unlinkName))
+      || cleanupFaults.backlogNames.has(String(args[0]).split(/[\\/]/).at(-1)!)) {
       throw Object.assign(new Error('injected emblem unlink failure'), { code: 'EACCES' });
     }
     return real.unlink(...args);
@@ -215,27 +220,29 @@ test('concurrent replacements drain a pending shared file without losing current
   expect(results.map((result) => result.status)).toEqual([200, 200]);
   const refs = await db.select({ emblemPath: classes.emblemPath }).from(classes)
     .where(inArray(classes.id, [classId, foreignId]));
-  expect((await readdir(directory)).sort()).toEqual(refs.map((row) => row.emblemPath).sort());
+  expect((await readdir(directory)).sort()).toEqual(
+    [foreignBefore.emblemPath, ...refs.map((row) => row.emblemPath)].sort(),
+  );
   expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
     .toHaveLength(0);
+  expect((await runEmblemCleanupBatch()).failed).toBe(0);
+  expect((await readdir(directory)).sort()).toEqual(refs.map((row) => row.emblemPath).sort());
 });
 
-test('post-commit cleanup query failure does not report a committed upload as failed', async () => {
+test('post-commit cleanup transaction failure does not report a committed upload as failed', async () => {
   activeCookie = adminCookie;
   const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
-  const originalSelect = db.select.bind(db);
-  const spy = vi.spyOn(db, 'select').mockImplementation((fields) => {
-    if (fields && typeof fields === 'object'
-      && ('storageName' in fields || (Object.keys(fields).length === 1 && fields.id === classes.id))) {
-      throw new Error('injected cleanup query failure');
-    }
-    return originalSelect(fields);
+  const originalTransaction = db.transaction.bind(db);
+  let transactions = 0;
+  const spy = vi.spyOn(db, 'transaction').mockImplementation((callback, config) => {
+    if (++transactions === 2) throw new Error('injected cleanup transaction failure');
+    return originalTransaction(callback, config);
   });
   const log = vi.spyOn(console, 'error').mockImplementation(() => {});
   let response: Response;
   try {
     response = await upload(classId, 'image/png');
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('discovery failed'), expect.any(Error));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(old.emblemPath!), expect.any(Error));
   }
   finally { spy.mockRestore(); log.mockRestore(); }
   expect(response.status).toBe(200);
@@ -245,6 +252,8 @@ test('post-commit cleanup query failure does not report a committed upload as fa
   expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
     .toHaveLength(1);
   expect((await upload(classId, 'image/png')).status).toBe(200);
+  expect(await readdir(directory)).toContain(old.emblemPath);
+  expect((await runEmblemCleanupBatch()).failed).toBe(0);
   expect(await readdir(directory)).not.toContain(old.emblemPath);
   expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
     .toHaveLength(0);
@@ -263,6 +272,8 @@ test('post-commit unlink failure does not report a committed upload as failed', 
   const [pending] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!));
   expect(pending).toMatchObject({ attempts: 1, lastError: expect.stringContaining('injected emblem unlink failure') });
   expect((await upload(classId, 'image/png')).status).toBe(200);
+  expect(await readdir(directory)).toContain(old.emblemPath);
+  expect((await runEmblemCleanupBatch()).failed).toBe(0);
   expect(await readdir(directory)).not.toContain(old.emblemPath);
   expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
     .toHaveLength(0);
@@ -276,6 +287,7 @@ test('persistent cleanup failures remain visible and retries preserve the curren
   try {
     expect((await upload(classId, 'image/png')).status).toBe(200);
     expect((await upload(classId, 'image/png')).status).toBe(200);
+    expect((await runEmblemCleanupBatch(1)).failed).toBe(1);
     const [pending] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!));
     expect(pending.attempts).toBe(2);
     expect(pending.lastError).toContain('injected emblem unlink failure');
@@ -292,6 +304,7 @@ test('persistent cleanup failures remain visible and retries preserve the curren
     cleanupFaults.unlinkName = null;
     log.mockRestore();
   }
+  expect((await runEmblemCleanupBatch()).failed).toBe(0);
   expect((await upload(classId, 'image/png')).status).toBe(200);
   expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
     .toHaveLength(0);
@@ -329,4 +342,127 @@ test('retry does not remove a pending file referenced by another class during it
     release();
     await Promise.allSettled([reading, replacing]);
   }
+});
+
+test('upload does not scan or retry a large unrelated cleanup backlog', async () => {
+  activeCookie = adminCookie;
+  const names = Array.from({ length: 160 }, () => `${randomUUID()}.png`);
+  await db.insert(emblemCleanup).values(names.map((storageName) => ({ storageName })));
+  names.forEach((name) => cleanupFaults.backlogNames.add(name));
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const response = await upload(classId, 'image/png');
+    expect(response.status).toBe(200);
+    const [current] = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+      .where(eq(classes.id, classId));
+    expect((await response.json()).name).toBe(current.emblemPath);
+    const pending = await db.select({ attempts: emblemCleanup.attempts }).from(emblemCleanup)
+      .where(inArray(emblemCleanup.storageName, names));
+    expect(pending).toHaveLength(160);
+    expect(pending.every((task) => task.attempts === 0)).toBe(true);
+  } finally {
+    cleanupFaults.backlogNames.clear();
+    log.mockRestore();
+    await db.delete(emblemCleanup).where(inArray(emblemCleanup.storageName, names));
+  }
+});
+
+test('standalone cleanup command drains a bounded batch per invocation', async () => {
+  const names = Array.from({ length: 5 }, () => `${randomUUID()}.png`);
+  await db.insert(emblemCleanup).values(names.map((storageName) => ({ storageName })));
+  await Promise.all(names.map((name) => writeFile(join(directory, name), png)));
+  const run = () => JSON.parse(execFileSync(process.execPath, [
+    'node_modules/tsx/dist/cli.mjs', 'scripts/retry-emblem-cleanup.ts', '--limit', '2',
+  ], { cwd: process.cwd(), env: { ...process.env, EMBLEM_DIR: directory }, encoding: 'utf8' })) as {
+    attempted: number; failed: number; hasMore: boolean;
+  };
+  try {
+    expect(run()).toEqual({ attempted: 2, failed: 0, hasMore: true });
+    expect(await db.select().from(emblemCleanup).where(inArray(emblemCleanup.storageName, names)))
+      .toHaveLength(3);
+    expect(run()).toEqual({ attempted: 2, failed: 0, hasMore: true });
+    expect(run()).toEqual({ attempted: 1, failed: 0, hasMore: false });
+    expect(await db.select().from(emblemCleanup).where(inArray(emblemCleanup.storageName, names)))
+      .toHaveLength(0);
+    expect((await readdir(directory)).some((name) => names.includes(name))).toBe(false);
+  } finally {
+    await db.delete(emblemCleanup).where(inArray(emblemCleanup.storageName, names));
+    await Promise.all(names.map((name) => rm(join(directory, name), { force: true })));
+  }
+});
+
+test('batch skips referenced files and processes an eligible file within its limit', async () => {
+  const [current] = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+    .where(eq(classes.id, foreignId));
+  const eligible = `${randomUUID()}.png`;
+  await db.insert(emblemCleanup).values([
+    { storageName: current.emblemPath! }, { storageName: eligible },
+  ]).onConflictDoNothing();
+  await writeFile(join(directory, eligible), png);
+  try {
+    expect(await runEmblemCleanupBatch(1)).toEqual({ attempted: 1, failed: 0, hasMore: false });
+    expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, eligible)))
+      .toHaveLength(0);
+    expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, current.emblemPath!)))
+      .toHaveLength(1);
+    const image = await GET(new Request(url(foreignId)), context(foreignId));
+    expect(image.status).toBe(200);
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(png);
+  } finally {
+    await db.delete(emblemCleanup).where(inArray(emblemCleanup.storageName, [current.emblemPath!, eligible]));
+    await rm(join(directory, eligible), { force: true });
+  }
+});
+
+test('failed batch item does not starve later cleanup tasks', async () => {
+  const names = [`${randomUUID()}.png`, `${randomUUID()}.png`].sort();
+  await db.insert(emblemCleanup).values(names.map((storageName) => ({ storageName })));
+  await Promise.all(names.map((name) => writeFile(join(directory, name), png)));
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+  cleanupFaults.backlogNames.add(names[0]);
+  try {
+    expect(await runEmblemCleanupBatch(1)).toEqual({ attempted: 1, failed: 1, hasMore: true });
+    expect(await runEmblemCleanupBatch(1)).toEqual({ attempted: 1, failed: 0, hasMore: true });
+    expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, names[1])))
+      .toHaveLength(0);
+    const [failed] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, names[0]));
+    expect(failed.attempts).toBe(1);
+    expect(failed.lastError).toContain('injected emblem unlink failure');
+  } finally {
+    cleanupFaults.backlogNames.clear();
+    log.mockRestore();
+    await runEmblemCleanupBatch(2);
+    await db.delete(emblemCleanup).where(inArray(emblemCleanup.storageName, names));
+    await Promise.all(names.map((name) => rm(join(directory, name), { force: true })));
+  }
+});
+
+test('standalone cleanup command exposes failures without following unsafe paths', async () => {
+  const unsafe = `../${randomUUID()}.png`;
+  await db.insert(emblemCleanup).values({ storageName: unsafe });
+  const [current] = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+    .where(eq(classes.id, classId));
+  try {
+    const result = spawnSync(process.execPath, [
+      'node_modules/tsx/dist/cli.mjs', 'scripts/retry-emblem-cleanup.ts', '--limit', '1',
+    ], { cwd: process.cwd(), env: { ...process.env, EMBLEM_DIR: directory }, encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toEqual({ attempted: 1, failed: 1, hasMore: false });
+    expect(result.stderr).toContain('Invalid emblem cleanup filename');
+    const [pending] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, unsafe));
+    expect(pending).toMatchObject({ attempts: 1, lastError: expect.stringContaining('Invalid emblem cleanup filename') });
+    const image = await GET(new Request(url(classId)), context(classId));
+    expect(image.status).toBe(200);
+    expect(await readdir(directory)).toContain(current.emblemPath);
+  } finally {
+    await db.delete(emblemCleanup).where(eq(emblemCleanup.storageName, unsafe));
+  }
+});
+
+test('standalone cleanup command rejects an unbounded batch size', () => {
+  const result = spawnSync(process.execPath, [
+    'node_modules/tsx/dist/cli.mjs', 'scripts/retry-emblem-cleanup.ts', '--limit', '101',
+  ], { cwd: process.cwd(), env: { ...process.env, EMBLEM_DIR: directory }, encoding: 'utf8' });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('Cleanup batch limit must be between 1 and 100');
 });

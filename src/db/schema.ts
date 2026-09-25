@@ -13,14 +13,14 @@ export const classes = pgTable('classes', {
   emblemPath: text('emblem_path'),
   archived: boolean('archived').notNull().default(false),
   createdAt: createdAt(),
-});
+}, (t) => [index('classes_emblem_path_idx').on(t.emblemPath)]);
 
 export const emblemCleanup = pgTable('emblem_cleanup', {
   storageName: text('storage_name').primaryKey(),
   attempts: integer('attempts').notNull().default(0),
   lastError: text('last_error'),
   createdAt: createdAt(),
-});
+}, (t) => [index('emblem_cleanup_retry_idx').on(t.attempts, t.createdAt, t.storageName)]);
 
 export const classTeachers = pgTable('class_teachers', {
   classId: uuid('class_id').notNull().references(() => classes.id),
