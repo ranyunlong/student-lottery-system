@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { StudentImport } from './student-import';
 import { importPastedStudentsAction, archiveStudentAction, restoreStudentAction } from '../features/students/actions';
@@ -16,6 +16,85 @@ const roster = [
 ];
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { cleanup(); });
+
+test('late Excel 422 confirmation cannot restore A preview or error after selecting B', async () => {
+  let finishConfirm!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finishConfirm = resolve; });
+  let finishBPreview!: (response: Response) => void;
+  const pendingB = new Promise<Response>((resolve) => { finishBPreview = resolve; });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      rows: [{ studentNumber: 'A', name: '甲', gender: null }], errors: [],
+    }), { status: 200 }))
+    .mockReturnValueOnce(pending)
+    .mockReturnValueOnce(pendingB);
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    render(<StudentImport classId="class-one" students={roster} />);
+    const input = screen.getByLabelText('选择 Excel 文件');
+    const fileA = new File(['A'], 'A.xlsx');
+    const fileB = new File(['B'], 'B.xlsx');
+    fireEvent.change(input, { target: { files: [fileA] } });
+    fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+    expect(await screen.findByText('甲')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认导入' }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[1][1].body as FormData).get('file')).toBe(fileA);
+    fireEvent.change(input, { target: { files: [fileB] } });
+    const previewButton = screen.getByRole('button', { name: '预览名单' });
+    expect(previewButton).toBeEnabled();
+    fireEvent.click(previewButton);
+    expect((fetchMock.mock.calls[2][1].body as FormData).get('file')).toBe(fileB);
+    await act(async () => finishConfirm(new Response(JSON.stringify({
+      rows: [], errors: [{ line: 2, message: 'A 文件错误' }],
+    }), { status: 422 })));
+    expect(screen.queryByText('A 文件错误')).not.toBeInTheDocument();
+    expect(screen.queryByText('文件有错误，请重新预览')).not.toBeInTheDocument();
+    expect(screen.queryByText('甲')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '确认导入' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '处理中…' })).toBeDisabled();
+    await act(async () => finishBPreview(new Response(JSON.stringify({
+      rows: [{ studentNumber: 'B', name: '乙', gender: null }], errors: [],
+    }), { status: 200 })));
+    expect(screen.getByText('乙')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '预览名单' })).toBeEnabled();
+    expect(refresh).not.toHaveBeenCalled();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test('late Excel success cannot report A imported in the paste tab', async () => {
+  let finishConfirm!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { finishConfirm = resolve; });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      rows: [{ studentNumber: 'A', name: '甲', gender: null }], errors: [],
+    }), { status: 200 }))
+    .mockReturnValueOnce(pending);
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    render(<StudentImport classId="class-one" students={roster} />);
+    fireEvent.change(screen.getByLabelText('选择 Excel 文件'), { target: { files: [new File(['A'], 'A.xlsx')] } });
+    fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+    expect(await screen.findByText('甲')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: '确认导入' });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
+    fireEvent.change(screen.getByLabelText('粘贴学生数据'), { target: { value: 'B\t乙\t女' } });
+    expect(screen.getByRole('button', { name: '预览名单' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+    expect(screen.getByText('乙')).toBeInTheDocument();
+    await act(async () => finishConfirm(new Response(JSON.stringify({ inserted: 1, updated: 0 }), { status: 200 })));
+    expect(screen.getByLabelText('粘贴学生数据')).toHaveValue('B\t乙\t女');
+    expect(screen.getByText('乙')).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('甲')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '预览名单' })).toBeEnabled();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  } finally { vi.unstubAllGlobals(); }
+});
 
 test('a stale Excel preview cannot reappear after selecting another file or confirm that other file', async () => {
   let finishFirst!: (response: Response) => void;

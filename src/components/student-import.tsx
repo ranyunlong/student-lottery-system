@@ -21,6 +21,8 @@ export function StudentImport({ classId, students }: { classId: string; students
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [previewFile, setPreviewFile] = useState<File | null>(null);
   const previewVersion = useRef(0);
+  const selectedFileRef = useRef<File | null>(null);
+  const activeImport = useRef<number | null>(null);
   const [errorPage, setErrorPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
@@ -30,6 +32,10 @@ export function StudentImport({ classId, students }: { classId: string; students
 
   function clearPreview() {
     previewVersion.current++;
+    if (activeImport.current !== null) {
+      activeImport.current = null;
+      setBusy(false);
+    }
     setPreview(null);
     setPreviewFile(null);
     setFeedback(null);
@@ -44,7 +50,9 @@ export function StudentImport({ classId, students }: { classId: string; students
     document.getElementById('import-tab-' + next)?.focus();
   }
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
-    setFile(event.target.files?.[0] ?? null);
+    const nextFile = event.target.files?.[0] ?? null;
+    selectedFileRef.current = nextFile;
+    setFile(nextFile);
     clearPreview();
   }
   async function excelRequest(intent: 'preview' | 'confirm', selectedFile: File) {
@@ -57,6 +65,7 @@ export function StudentImport({ classId, students }: { classId: string; students
     return { response, result };
   }
   async function showPreview() {
+    if (busy || activeImport.current !== null) return;
     clearPreview();
     const version = previewVersion.current;
     if (mode === 'paste') {
@@ -69,23 +78,34 @@ export function StudentImport({ classId, students }: { classId: string; students
       setPreview(result);
       return;
     }
+    activeImport.current = version;
     setBusy(true);
     try {
       if (!file) throw new Error('请选择 .xlsx 文件');
       const selectedFile = file;
       const { result } = await excelRequest('preview', selectedFile);
-      if (version !== previewVersion.current) return;
+      if (version !== previewVersion.current || activeImport.current !== version || selectedFile !== selectedFileRef.current) return;
       setPreviewFile(selectedFile);
       setPreview(result as ImportPreview);
     } catch (error) {
-      if (version === previewVersion.current) {
+      if (version === previewVersion.current && activeImport.current === version) {
         setFeedback({ ok: false, message: error instanceof Error ? error.message : '预览失败，请重试' });
       }
-    } finally { setBusy(false); }
+    } finally {
+      if (activeImport.current === version) {
+        activeImport.current = null;
+        setBusy(false);
+      }
+    }
   }
   async function confirmImport() {
-    if (!preview?.rows.length || preview.errors.length || busy) return;
+    if (!preview?.rows.length || preview.errors.length || busy || activeImport.current !== null) return;
     if (mode === 'excel' && (!previewFile || previewFile !== file)) return;
+    const version = previewVersion.current;
+    const confirmedFile = mode === 'excel' ? previewFile : null;
+    const isCurrent = () => activeImport.current === version && previewVersion.current === version
+      && (confirmedFile === null || confirmedFile === selectedFileRef.current);
+    activeImport.current = version;
     setBusy(true);
     setFeedback(null);
     try {
@@ -94,6 +114,10 @@ export function StudentImport({ classId, students }: { classId: string; students
         data.set('classId', classId);
         data.set('text', text);
         const result = await importPastedStudentsAction(data);
+        if (!isCurrent()) {
+          if (result.ok) router.refresh();
+          return;
+        }
         if (!result.ok) {
           if (result.errors) {
             setErrorPage(0);
@@ -104,7 +128,11 @@ export function StudentImport({ classId, students }: { classId: string; students
         }
         setFeedback({ ok: true, message: '导入完成：新增 ' + result.inserted + '，更新 ' + result.updated });
       } else {
-        const { response, result } = await excelRequest('confirm', previewFile!);
+        const { response, result } = await excelRequest('confirm', confirmedFile!);
+        if (!isCurrent()) {
+          if (response.ok) router.refresh();
+          return;
+        }
         if (!response.ok) {
           setErrorPage(0);
           setPreview(result as ImportPreview);
@@ -116,8 +144,13 @@ export function StudentImport({ classId, students }: { classId: string; students
       setPreview(null);
       router.refresh();
     } catch (error) {
-      setFeedback({ ok: false, message: error instanceof Error ? error.message : '导入失败，请重试' });
-    } finally { setBusy(false); }
+      if (isCurrent()) setFeedback({ ok: false, message: error instanceof Error ? error.message : '导入失败，请重试' });
+    } finally {
+      if (activeImport.current === version) {
+        activeImport.current = null;
+        setBusy(false);
+      }
+    }
   }
   async function changeArchive(student: StudentItem) {
     if (!student.archived && !window.confirm('确定归档' + student.name + '？')) return;
