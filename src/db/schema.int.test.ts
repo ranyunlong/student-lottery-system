@@ -29,6 +29,8 @@ test('prize stock cannot become negative', async () => {
   const prizeClassId = randomUUID();
   await db.insert(classes).values({ id: prizeClassId, name: '库存班' });
   await expect(db.insert(prizes).values({ classId: prizeClassId, name: '贴纸', stock: -1 })).rejects.toThrow();
+  const [prize] = await db.insert(prizes).values({ classId: prizeClassId, name: '贴纸', stock: 0 }).returning();
+  await expect(db.update(prizes).set({ stock: -1 }).where(eq(prizes.id, prize.id))).rejects.toThrow();
 });
 
 test('only one round can be active in a session', async () => {
@@ -55,6 +57,30 @@ test('session candidates cannot refer to another class student', async () => {
   const [foreignStudent] = await db.insert(students).values({ classId: foreignClassId, studentNumber: '001', name: '外班学生' }).returning();
   await db.insert(lotterySessions).values({ id: sessionId, classId: localClassId, mode: 'student_prize', createdBy: teacherId });
   await expect(db.insert(sessionStudents).values({ classId: localClassId, sessionId, studentId: foreignStudent.id })).rejects.toThrow();
+});
+
+test('a winning record must reference a round in its own session', async () => {
+  const teacherId = randomUUID();
+  const winClassId = randomUUID();
+  const sessionA = randomUUID();
+  const sessionB = randomUUID();
+  const roundId = randomUUID();
+  await db.insert(user).values({ id: teacherId, name: 'Teacher', email: `${teacherId}@example.test` });
+  await db.insert(classes).values({ id: winClassId, name: 'Round class' });
+  const [student] = await db.insert(students).values({ classId: winClassId, studentNumber: '001', name: 'Student' }).returning();
+  const [prize] = await db.insert(prizes).values({ classId: winClassId, name: 'Prize', stock: 1 }).returning();
+  await db.insert(lotterySessions).values([
+    { id: sessionA, classId: winClassId, mode: 'student_prize', createdBy: teacherId },
+    { id: sessionB, classId: winClassId, mode: 'student_prize', createdBy: teacherId },
+  ]);
+  await db.insert(lotteryRounds).values({ id: roundId, classId: winClassId, sessionId: sessionB, startToken: randomUUID(), startedBy: teacherId });
+  const win = {
+    classId: winClassId, roundId, studentId: student.id,
+    studentNumberSnapshot: '001', studentNameSnapshot: 'Student', prizeId: prize.id,
+    prizeNameSnapshot: 'Prize', actorId: teacherId,
+  };
+  await expect(db.insert(winningRecords).values({ ...win, sessionId: sessionA })).rejects.toThrow();
+  await expect(db.insert(winningRecords).values({ ...win, sessionId: sessionB })).resolves.toBeDefined();
 });
 
 test('saved winner snapshots cannot be rewritten or deleted', async () => {

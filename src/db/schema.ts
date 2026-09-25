@@ -107,6 +107,7 @@ export const lotteryRounds = pgTable('lottery_rounds', {
   stoppedAt: timestamp('stopped_at', { withTimezone: true }),
 }, (t) => [
   unique('lottery_rounds_class_id_unique').on(t.classId, t.id),
+  unique('lottery_rounds_class_session_id_unique').on(t.classId, t.sessionId, t.id),
   uniqueIndex('lottery_rounds_one_active_per_session').on(t.sessionId).where(sql`${t.status} = 'active'`),
   foreignKey({ columns: [t.classId, t.sessionId], foreignColumns: [lotterySessions.classId, lotterySessions.id] }),
   foreignKey({ columns: [t.classId, t.studentId], foreignColumns: [students.classId, students.id] }),
@@ -131,7 +132,7 @@ export const winningRecords = pgTable('winning_records', {
 }, (t) => [
   unique('winning_records_class_id_unique').on(t.classId, t.id),
   foreignKey({ columns: [t.classId, t.sessionId], foreignColumns: [lotterySessions.classId, lotterySessions.id] }),
-  foreignKey({ columns: [t.classId, t.roundId], foreignColumns: [lotteryRounds.classId, lotteryRounds.id] }),
+  foreignKey({ columns: [t.classId, t.sessionId, t.roundId], foreignColumns: [lotteryRounds.classId, lotteryRounds.sessionId, lotteryRounds.id] }),
   foreignKey({ columns: [t.classId, t.studentId], foreignColumns: [students.classId, students.id] }),
   foreignKey({ columns: [t.classId, t.prizeId], foreignColumns: [prizes.classId, prizes.id] }),
   check('winning_records_redemption_status_check', sql`${t.redemptionStatus} in ('pending', 'redeemed')`),
