@@ -1,88 +1,88 @@
-# Student Lottery System Design
+# 学生抽奖系统设计文档
 
-Date: 2026-09-25
-Status: Pending user review
+日期：2026-09-25
+状态：待用户审阅
 
-## Goal and Scope
+## 目标与范围
 
-Build a Chinese-language, teacher-operated student lottery system for multiple teachers and classes. An administrator creates teacher accounts and assigns teachers to classes. Each class owns its roster, emblem, prizes, inventory, lottery sessions, winning history, and redemption history. Students never log in. The first release runs on a public server using Docker Compose as a single Next.js application with PostgreSQL.
+建设面向多位老师、多个班级的中文学生抽奖系统。管理员创建老师账号并分配班级；每个班级独立管理学生、班徽、奖品及库存、抽奖场次、中奖和兑换记录。学生不登录系统。首版以单体 Next.js 应用加 PostgreSQL 数据库，通过 Docker Compose 部署在公网服务器。
 
-## Roles and Access
+## 角色与权限
 
-- Administrator: create, disable, and reset teacher accounts; create and archive classes; assign and remove class teachers; access class administration and audit records.
-- Teacher: sign in, change their password, and manage only assigned classes and their students, prizes, sessions, winning records, and redemptions.
-- No public registration or student accounts. Removing an assignment revokes class access immediately. Every server-side read and write verifies the role and class membership.
-- Create the initial administrator with a one-time deployment command, using credentials supplied through the environment rather than committed to source control.
+- 管理员：创建、停用老师账号并重置密码；创建、归档班级；分配或移除班级老师；查看班级管理及审计记录。
+- 老师：登录、修改本人密码，仅管理获授权班级的学生、奖品、抽奖场次、中奖和兑换记录。
+- 不开放自行注册，不创建学生账号。移除班级分配后立即失去该班级的访问权限。服务端每次读写都校验角色和班级权限。
+- 部署时通过一次性命令创建首位管理员；凭据从部署环境提供，不写入代码仓库。
 
-## Data and Lifecycle
+## 数据模型与生命周期
 
-- `users`: authentication identity, administrator/teacher role, active state, password-change requirement.
-- `classes`: name, emblem path, archived state. `class_teachers` joins teachers to classes with a unique `(class_id, teacher_id)` pair.
-- `students`: database-generated increasing ID; class ID; student number stored as text to preserve leading zeroes; name; gender; archived state. `(class_id, student_number)` is unique. Historical winnings retain student name and number snapshots.
-- `prizes`: class ID, name, current stock, archived state. An append-only stock ledger records delta, reason, operator, timestamp, and optional winning-record reference. Stock never becomes negative.
-- `lottery_sessions`: class ID, mode, status (`draft`, `active`, `completed`), configuration, creator, and timestamps. Candidate rows capture selected students and, for mode one, prizes and per-session quantity caps. Configuration is editable in draft and fixed once active.
-- `lottery_rounds`: unique start token, chosen student for mode one if applicable, status, and the starting/stopping teachers. At most one round per session is active.
-- `winning_records`: immutable session/round outcome, student and prize snapshots, operator and timestamp, plus pending/redeemed state. Redemption records the teacher and timestamp. Corrections are audited, not silently rewritten.
-- Archived students, prizes, and classes remain in historical records. Referenced records cannot be hard-deleted through the application.
+- `users`：登录身份、管理员或老师角色、启用状态、是否需要修改密码。
+- `classes`：班级名称、班徽路径、归档状态。`class_teachers` 关联老师与班级，`(class_id, teacher_id)` 唯一。
+- `students`：数据库自增 ID、所属班级、作为文本保存的学号（保留前导零）、姓名、性别、归档状态。`(class_id, student_number)` 唯一；历史中奖记录保留当时的姓名和学号快照。
+- `prizes`：所属班级、名称、当前库存、归档状态。追加式库存流水保存变动数量、原因、操作老师、时间及关联中奖记录；库存不可为负。
+- `lottery_sessions`：班级、模式、状态（`draft` 草稿、`active` 进行中、`completed` 已完成）、配置、创建人和时间。候选记录保存学生；模式一另保存候选奖品及本场数量上限。草稿可编辑，开始后配置固定。
+- `lottery_rounds`：唯一的开始令牌、模式一指定的学生、轮次状态及开始/停止操作老师。同一场抽奖最多有一轮处于进行中。
+- `winning_records`：不可覆盖的场次/轮次结果、学生及奖品快照、操作老师、时间、待兑换/已兑换状态。兑换另记老师和时间；纠错留审计记录，不暗中改写结果。
+- 已归档的学生、奖品、班级仍保留在历史记录中；应用不允许硬删除被引用的数据。
 
-## Student Import
+## 学生导入
 
-- Accept `.xlsx` and pasted rows. Template columns are `学号`, `姓名`, `性别` in that order. Pasted text has one student per line with tab-separated columns, as copied from a spreadsheet. The generated database ID is never imported.
-- Accept `男`, `女`, or empty gender (stored as unspecified). Require nonempty student number and name, trim surrounding whitespace, and treat student number as text.
-- Preview rows and row-level errors before confirmation. Reject files larger than 5 MiB or more than 5,000 data rows. Duplicate student numbers within a batch or invalid rows block the whole import; no partial writes.
-- Confirmation inserts new numbers and updates name/gender for existing numbers in that class in one transaction. Omitted students are not deleted or archived. Show inserted/updated counts.
-- Parse Excel as data only. Validate actual file content and server-side limits, not just extension, MIME type, or browser checks.
+- 支持 `.xlsx` 文件和粘贴导入。模板列顺序为`学号、姓名、性别`；粘贴内容每行一名学生，列间使用制表符（可直接从表格复制）。数据库自增 ID 不参与导入。
+- 性别接受`男`、`女`或留空（记为未填写）；学号与姓名必填，去掉首尾空白；学号始终按文本处理。
+- 确认前展示预览及逐行错误。文件上限 5 MiB、数据行上限 5,000。导入批次内学号重复或有无效行时，整批不能提交，不进行部分写入。
+- 确认后在同一事务中新增该班级的新学号，按学号更新已有学生的姓名和性别。不删除或归档本次未出现的学生；显示新增、更新数量。
+- Excel 只作为数据解析，不执行其中内容。服务端验证实际文件内容及大小限制，不能只依赖扩展名、MIME 类型或浏览器校验。
 
-## Prize and Inventory Management
+## 奖品与库存
 
-- Teachers create and archive class prizes and adjust stock by an explicit signed quantity and reason. Adjustments cannot make stock negative. Active prize names are unique within a class.
-- Prize stock is shared by sessions of its class. A mode-one candidate quantity is a per-session cap, not a reservation. At setup it cannot exceed current stock; at stop current stock is rechecked in case another session or adjustment changed it.
-- Every successful win deducts one unit and records a stock-ledger entry in the same transaction. Redemption does not deduct stock again.
+- 老师创建、归档本班奖品；调整库存时填写增减数量和原因。调整不能使库存为负；同班级在用奖品的名称不能重复。
+- 同班级的多场抽奖使用同一份奖品库存。模式一设置的候选数量是本场上限，不提前预留库存。设置时不得超过当前库存；每次停止抽取时还要重新检查库存，以应对其他场次或人工调整。
+- 每次成功中奖在同一数据库事务内扣减一份库存并写入库存流水。兑换时不再次扣库存。
 
-## Lottery Rules
+## 抽奖规则
 
-Both modes are teacher-operated. Starting a round begins browser animation without preselecting an outcome. The teacher manually stops it; only then does the server determine and commit the result with a cryptographically secure random source. A repeated stop with the same round token returns the existing result without a second deduction or winning record. An unfinished round can be resumed after reload or canceled with no outcome and no stock change, for example if stock became unavailable while the animation was running.
+两种模式均由老师操作。开始一轮时只启动浏览器动画，不预先确定结果；老师手动点击停止后，服务端才使用密码学安全的随机数确定并保存结果。同一轮次令牌被重复提交时返回已有结果，不重复扣库存或创建中奖记录。未完成的轮次可在刷新后继续，或取消而不产生结果、不改变库存，例如动画运行期间库存已不足。
 
-### Mode One: Chosen Student, Random Prize
+### 模式一：指定学生，随机奖品
 
-- The teacher chooses candidate students, candidate prizes with a positive quantity for each, and a positive per-student draw limit. For each round they select one candidate student who has not reached that limit.
-- Stopping awards exactly one prize. Eligible prizes have positive remaining session quota and class stock. The random weight of a prize is the smaller of these remaining quantities; weights of 3 and 1 give probabilities of 3/4 and 1/4.
-- A success consumes one of the chosen student's draws, one unit of the chosen prize's session quota, and one unit of class stock. Other students' limits are unaffected.
-- If no prize is eligible or the chosen student reached their limit, no outcome or stock change is made. The teacher can complete the session; committed rounds remain visible.
+- 老师设置候选学生、候选奖品及每种奖品的正整数数量，并设置每名学生的正整数抽取次数上限。每轮从候选名单中指定一名尚未达到上限的学生。
+- 停止后，该学生恰好获得一件奖品。只有本场剩余数量和班级库存都大于零的奖品可参与；奖品权重取两者中较小的剩余数量。例如两个奖品权重为 3 和 1，则抽中概率分别为 3/4 和 1/4。
+- 成功抽取后，该学生的已用次数加一、本场该奖品的已用数量加一，班级奖品库存减一；其他学生的次数不受影响。
+- 如果已无可抽奖品或所选学生达到次数上限，则不产生中奖记录、不改变库存。老师可以结束该场，已完成轮次仍可查看。
 
-### Mode Two: Fixed Prize, Random Student
+### 模式二：指定奖品，随机中奖人
 
-- The teacher chooses candidate students, one fixed prize, and a positive round count not exceeding the number of candidates or current prize stock at activation.
-- Each stop uniformly chooses among candidates who have not won in this session. A student may win in a new session, but not twice in the same session.
-- Each success awards one unit of the fixed prize. No further rounds start after the configured count, candidate exhaustion, or stock exhaustion. Earlier outcomes remain valid.
+- 老师设置候选学生、一种固定奖品和正整数抽取轮数。开始抽奖时，轮数不得超过候选人数或该奖品的当前库存。
+- 每次停止时，从本场尚未中奖的候选学生中等概率选出一人。同一场内不重复中奖；新开一场后仍可再次参与。
+- 每轮成功后发出一件固定奖品。达到设定轮数、候选人用尽或库存耗尽时不再开始新轮次；此前结果保持有效。
 
-### Concurrency and Corrections
+### 并发与纠错
 
-- A database transaction locks the session, round, and prize rows in a consistent order, then rechecks permission, eligibility, quotas, and stock before choosing and saving the result. Conflicts are retried a bounded number of times or return a clear retryable error. Stock cannot go negative.
-- Results are not rerolled, deleted, or overwritten. Teachers mark pending winnings redeemed; the teacher and time are saved. An administrator can correct mistaken redemption status with a reason and audit entry. Inventory corrections use the stock ledger, not edits to historical winnings.
+- 停止抽取时在数据库事务内按固定顺序锁定场次、轮次和奖品，再核验权限、候选资格、本场数量及库存，最后确定并保存结果。冲突仅有限次重试，或给出可重试的明确错误；库存不能为负。
+- 不重抽、删除或覆盖既有结果。老师将待兑换记录标记为已兑换，并记录老师和时间。管理员纠正误标的兑换状态时必须填写原因并留下审计记录；库存纠错走库存流水，不改写历史中奖结果。
 
-## Application Structure and UX
+## 应用结构与界面
 
-- Next.js App Router, TypeScript, and Tailwind CSS. Separate class membership, import parsing, draw rules, inventory mutations, and redemption operations into focused server-side modules. Use PostgreSQL with Drizzle and an established authentication library with administrator-created accounts and public registration disabled.
-- Administrator screens: teacher accounts, classes, teacher assignments, audit history. Teacher screens: class selector, roster/import, emblem, prizes/stock, session setup, live draw, winnings, and pending/redeemed lists. No marketing landing page.
-- The live draw shows the current student or candidate pool, remaining draws, prize quotas, and stock. The committed server result is the only displayed winner/prize; animation is presentation only.
-- Keep the Chinese-language interface responsive, keyboard usable, and accessible. Show actionable validation and concurrency errors; retain committed outcomes after reload or a network interruption.
-- Accept PNG, JPEG, or WebP emblems up to 2 MiB. Store with generated names under an application-managed path on a persistent Docker volume and serve only through authorized class routes. Validate actual content.
+- 使用 Next.js App Router、TypeScript、Tailwind CSS。班级权限、导入解析、抽奖规则、库存变动、兑换操作分别放在职责清晰的服务端模块。数据库使用 PostgreSQL + Drizzle；登录采用成熟认证库，由管理员创建账号并关闭公开注册。
+- 管理员界面包含老师账号、班级、老师分配、审计记录；老师界面包含班级选择、学生名单与导入、班徽、奖品与库存、场次设置、现场抽奖、中奖记录及待兑换/已兑换列表。首页直接进入实际工作流程，不制作宣传页。
+- 抽奖现场展示当前学生或候选范围、剩余抽取次数、奖品本场数量及库存。只展示服务端已经保存的中奖人和奖品；动画仅用于呈现。
+- 中文界面适配桌面和手机，支持键盘操作及无障碍使用。校验和并发错误应有明确提示；刷新或网络中断后仍能查看已保存结果。
+- 班徽支持不超过 2 MiB 的 PNG、JPEG、WebP。文件以生成的名称存入 Docker 持久化目录，并只通过有班级权限的接口提供；校验实际文件内容。
 
-## Deployment and Operations
+## 部署与运维
 
-- Docker Compose runs the Next.js app and PostgreSQL. A public HTTPS reverse proxy routes to the app; PostgreSQL is not exposed to the internet. Database and emblem files have separate persistent volumes.
-- Provide an example environment file without secrets, database migration and initial-admin commands, health checks, backup/restore instructions for both volumes, and deployment documentation. Apply migrations before accepting traffic.
-- Ship a lockfile and pin compatible releases of Next.js, Tailwind CSS, authentication, Drizzle, the Excel parser, and Node during planning. Never commit production secrets or sample passwords.
-- The initial target is one server. Multi-instance storage, external object storage, and distributed jobs are outside the first release.
+- Docker Compose 运行 Next.js 应用和 PostgreSQL；公网 HTTPS 反向代理转发到应用，数据库不向公网开放。数据库数据和班徽文件使用不同的持久化卷。
+- 提供不含密钥的环境变量示例、数据库迁移与首位管理员初始化命令、健康检查、两个数据卷的备份/恢复说明及部署文档。接收请求前完成数据库迁移。
+- 计划阶段确定兼容的 Next.js、Tailwind CSS、认证库、Drizzle、Excel 解析库及 Node 版本；交付锁文件。不提交生产密钥或示例密码。
+- 首版只考虑单服务器部署；多实例共享文件存储、外部对象存储和分布式任务不在范围内。
 
-## Verification and Acceptance
+## 验证与验收
 
-- Unit tests: import validation, weighted prize choice, uniform student choice, per-student limits, and no-repeat mode-two eligibility.
-- Database integration tests: class isolation, duplicate student numbers, atomic inventory, idempotent stop requests, concurrent stops on the same and different sessions, stock exhaustion, and redemption audit.
-- Browser tests: admin creation of a teacher and class assignment, teacher sign-in, Excel/paste import preview, both draw modes, and teacher redemption. Inspect desktop and mobile layouts of key workflows.
-- A release is accepted when an administrator can create teachers and classes, assign multiple teachers to one class, import students, configure prizes, manually stop each round in both modes, inspect winning history, mark prizes redeemed, and redeploy containers without data loss.
+- 单元测试覆盖导入校验、按数量加权选择奖品、等概率选择学生、每人次数上限及模式二单场不重复中奖。
+- 数据库集成测试覆盖班级数据隔离、学号重复、库存变动的原子性、重复停止请求、同场和跨场的并发停止、库存耗尽及兑换审计。
+- 浏览器测试覆盖管理员创建老师和分配班级、老师登录、Excel/粘贴导入预览、两种模式抽奖及老师标记兑换；检查关键页面的桌面和手机布局。
+- 验收条件：管理员能创建老师和班级，并将多位老师分配到同一班级；老师能导入学生、设置奖品、逐轮手动停止两种抽奖、查看中奖历史、标记已兑换；容器重新部署后数据不丢失。
 
-## Explicit Exclusions
+## 明确不包含
 
-Student login, public registration, shared inventory between classes, manually tuned prize probabilities, public winner pages, payments, and automatic redemption are not part of the first release.
+首版不包含学生登录、公开注册、跨班共享库存、手动设定奖品概率、公开中奖页面、支付和自动兑换。
