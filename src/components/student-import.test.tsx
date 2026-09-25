@@ -17,6 +17,41 @@ const roster = [
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { cleanup(); });
 
+test('a stale Excel preview cannot reappear after selecting another file or confirm that other file', async () => {
+  let finishFirst!: (response: Response) => void;
+  const first = new Promise<Response>((resolve) => { finishFirst = resolve; });
+  const previewResponse = (name: string) => new Response(JSON.stringify({
+    rows: [{ studentNumber: name, name, gender: null }], errors: [],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetchMock = vi.fn()
+    .mockReturnValueOnce(first)
+    .mockResolvedValueOnce(previewResponse('新文件'))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ inserted: 1, updated: 0 }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    render(<StudentImport classId="class-one" students={roster} />);
+    const input = screen.getByLabelText('选择 Excel 文件');
+    const oldFile = new File(['old'], 'old.xlsx');
+    const newFile = new File(['new'], 'new.xlsx');
+    fireEvent.change(input, { target: { files: [oldFile] } });
+    fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { files: [newFile] } });
+    finishFirst(previewResponse('旧文件'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '预览名单' })).toBeEnabled());
+    expect(screen.queryAllByText('旧文件')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: '确认导入' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+    expect(await screen.findAllByText('新文件')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: '确认导入' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect((fetchMock.mock.calls[1][1].body as FormData).get('file')).toBe(newFile);
+    expect((fetchMock.mock.calls[2][1].body as FormData).get('file')).toBe(newFile);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 test('paste preview shows row errors, blocks confirmation and invalidates stale preview on edit', async () => {
   render(<StudentImport classId="class-one" students={roster} />);
   fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
@@ -48,4 +83,18 @@ test('searches and filters roster and names explicit archive/restore actions', a
   fireEvent.click(screen.getByRole('button', { name: '恢复李四' }));
   await waitFor(() => expect(restoreStudentAction).toHaveBeenCalled());
   expect(archiveStudentAction).not.toHaveBeenCalled();
+});
+
+test('large paste preview paginates row errors without rendering every error', async () => {
+  render(<StudentImport classId="class-one" students={roster} />);
+  fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
+  fireEvent.change(screen.getByLabelText('粘贴学生数据'), { target: {
+    value: Array.from({ length: 200 }, () => '\t未命名\t').join('\n'),
+  } });
+  fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
+  const errors = screen.getByRole('alert');
+  expect(errors.querySelectorAll('li')).toHaveLength(100);
+  fireEvent.click(screen.getByRole('button', { name: '下一组错误' }));
+  expect(errors.querySelectorAll('li')).toHaveLength(100);
+  expect(errors).toHaveTextContent('第 101 行');
 });

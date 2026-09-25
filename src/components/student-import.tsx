@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { archiveStudentAction, importPastedStudentsAction, restoreStudentAction } from '../features/students/actions';
 import { parsePastedStudents, type ImportPreview } from '../features/students/parse';
@@ -9,6 +9,7 @@ type StudentItem = { id: number; studentNumber: string; name: string; gender: st
 type Mode = 'excel' | 'paste';
 type Filter = 'all' | 'active' | 'archived';
 const PAGE_SIZE = 50;
+const ERROR_PAGE_SIZE = 100;
 const inputClass = 'min-h-11 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700';
 const buttonClass = 'min-h-11 rounded px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:cursor-not-allowed disabled:opacity-50';
 
@@ -18,13 +19,22 @@ export function StudentImport({ classId, students }: { classId: string; students
   const [text, setText] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const previewVersion = useRef(0);
+  const [errorPage, setErrorPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [page, setPage] = useState(0);
 
-  function clearPreview() { setPreview(null); setFeedback(null); }
+  function clearPreview() {
+    previewVersion.current++;
+    setPreview(null);
+    setPreviewFile(null);
+    setFeedback(null);
+    setErrorPage(0);
+  }
   function selectMode(next: Mode) { setMode(next); clearPreview(); }
   function tabKeys(event: KeyboardEvent<HTMLButtonElement>, current: Mode) {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
@@ -37,10 +47,9 @@ export function StudentImport({ classId, students }: { classId: string; students
     setFile(event.target.files?.[0] ?? null);
     clearPreview();
   }
-  async function excelRequest(intent: 'preview' | 'confirm') {
-    if (!file) throw new Error('请选择 .xlsx 文件');
+  async function excelRequest(intent: 'preview' | 'confirm', selectedFile: File) {
     const data = new FormData();
-    data.set('file', file);
+    data.set('file', selectedFile);
     data.set('intent', intent);
     const response = await fetch('/api/classes/' + encodeURIComponent(classId) + '/students/import', { method: 'POST', body: data });
     const result = await response.json();
@@ -49,6 +58,7 @@ export function StudentImport({ classId, students }: { classId: string; students
   }
   async function showPreview() {
     clearPreview();
+    const version = previewVersion.current;
     if (mode === 'paste') {
       if (new TextEncoder().encode(text).byteLength > 2 * 1024 * 1024) {
         setFeedback({ ok: false, message: '粘贴内容不能超过 2 MiB' });
@@ -61,14 +71,21 @@ export function StudentImport({ classId, students }: { classId: string; students
     }
     setBusy(true);
     try {
-      const { result } = await excelRequest('preview');
+      if (!file) throw new Error('请选择 .xlsx 文件');
+      const selectedFile = file;
+      const { result } = await excelRequest('preview', selectedFile);
+      if (version !== previewVersion.current) return;
+      setPreviewFile(selectedFile);
       setPreview(result as ImportPreview);
     } catch (error) {
-      setFeedback({ ok: false, message: error instanceof Error ? error.message : '预览失败，请重试' });
+      if (version === previewVersion.current) {
+        setFeedback({ ok: false, message: error instanceof Error ? error.message : '预览失败，请重试' });
+      }
     } finally { setBusy(false); }
   }
   async function confirmImport() {
     if (!preview?.rows.length || preview.errors.length || busy) return;
+    if (mode === 'excel' && (!previewFile || previewFile !== file)) return;
     setBusy(true);
     setFeedback(null);
     try {
@@ -78,14 +95,18 @@ export function StudentImport({ classId, students }: { classId: string; students
         data.set('text', text);
         const result = await importPastedStudentsAction(data);
         if (!result.ok) {
-          if (result.errors) setPreview({ rows: preview.rows, errors: result.errors });
+          if (result.errors) {
+            setErrorPage(0);
+            setPreview({ rows: preview.rows, errors: result.errors });
+          }
           setFeedback({ ok: false, message: result.message });
           return;
         }
         setFeedback({ ok: true, message: '导入完成：新增 ' + result.inserted + '，更新 ' + result.updated });
       } else {
-        const { response, result } = await excelRequest('confirm');
+        const { response, result } = await excelRequest('confirm', previewFile!);
         if (!response.ok) {
+          setErrorPage(0);
           setPreview(result as ImportPreview);
           setFeedback({ ok: false, message: '文件有错误，请重新预览' });
           return;
@@ -120,6 +141,8 @@ export function StudentImport({ classId, students }: { classId: string; students
   const pages = Math.max(1, Math.ceil(searched.length / PAGE_SIZE));
   const currentPage = Math.min(page, pages - 1);
   const visible = searched.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const errorPages = Math.max(1, Math.ceil((preview?.errors.length ?? 0) / ERROR_PAGE_SIZE));
+  const currentErrorPage = Math.min(errorPage, errorPages - 1);
 
   return <div className="min-w-0 space-y-7">
     <section aria-labelledby="import-heading" className="space-y-4 border-b border-slate-200 pb-7">
@@ -152,8 +175,17 @@ export function StudentImport({ classId, students }: { classId: string; students
         <h3 className="font-semibold">预览 <span className="font-normal text-slate-600">{preview.rows.length} 条有效，{preview.errors.length} 项错误</span></h3>
         {!!preview.errors.length && <div role="alert" className="space-y-1 text-sm text-red-700">
           <p className="font-medium">有错误，整批不能提交：</p>
-          <ul className="max-h-48 list-disc overflow-y-auto pl-5">{preview.errors.map((error, index) =>
-            <li key={index}>{error.line ? '第 ' + error.line + ' 行：' : '文件：'}{error.message}</li>)}</ul>
+          <ul className="max-h-48 list-disc overflow-y-auto pl-5">{preview.errors
+            .slice(currentErrorPage * ERROR_PAGE_SIZE, (currentErrorPage + 1) * ERROR_PAGE_SIZE)
+            .map((error, index) =>
+              <li key={currentErrorPage * ERROR_PAGE_SIZE + index}>{error.line ? '第 ' + error.line + ' 行：' : '文件：'}{error.message}</li>)}</ul>
+          {errorPages > 1 && <nav aria-label="错误分页" className="flex items-center gap-3 text-slate-700">
+            <button type="button" disabled={currentErrorPage === 0} onClick={() => setErrorPage(currentErrorPage - 1)}
+              className={buttonClass + ' text-teal-800'}>上一组错误</button>
+            <span>{currentErrorPage + 1} / {errorPages}</span>
+            <button type="button" disabled={currentErrorPage === errorPages - 1} onClick={() => setErrorPage(currentErrorPage + 1)}
+              className={buttonClass + ' text-teal-800'}>下一组错误</button>
+          </nav>}
         </div>}
         {!!preview.rows.length && <div className="max-h-64 overflow-y-auto border-y border-slate-200 text-sm">
           <ol className="divide-y divide-slate-100">{preview.rows.slice(0, 100).map((row, index) =>

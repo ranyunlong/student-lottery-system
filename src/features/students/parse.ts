@@ -42,13 +42,23 @@ export function parsePastedStudents(text: string): ImportPreview {
   const preview: ImportPreview = { rows: [], errors: [] };
   const seen = new Set<string>();
   let count = 0;
-  for (const [index, rawLine] of text.split(/\r\n|\n|\r/).entries()) {
-    if (!rawLine.trim()) continue;
-    count++;
-    if (count === MAX_STUDENT_ROWS + 1) {
-      preview.errors.push({ line: index + 1, message: '数据行不能超过 5,000 行' });
+  const breaks = /\r\n|\n|\r/g;
+  let start = 0;
+  let line = 1;
+  while (true) {
+    const next = breaks.exec(text);
+    const rawLine = text.slice(start, next?.index ?? text.length);
+    if (rawLine.trim()) {
+      count++;
+      if (count > MAX_STUDENT_ROWS) {
+        preview.errors.push({ line, message: '数据行不能超过 5,000 行' });
+        break;
+      }
+      appendStudentRow(preview, seen, rawLine.split('\t'), line);
     }
-    appendStudentRow(preview, seen, rawLine.split('\t'), index + 1);
+    if (!next) break;
+    start = next.index + next[0].length;
+    line++;
   }
   return preview;
 }

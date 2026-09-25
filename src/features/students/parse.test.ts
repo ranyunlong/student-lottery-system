@@ -30,3 +30,20 @@ test('rejects more than 5000 pasted data rows', () => {
   const preview = parsePastedStudents(Array.from({ length: 5001 }, (_, i) => `${i}\t学生\t`).join('\n'));
   expect(preview.errors).toContainEqual({ line: 5001, message: expect.stringContaining('5,000') });
 });
+
+test('stops validation at 5000 data rows and reports only the first excess physical line', () => {
+  const text = ['001\t甲\t男', '', '', ...Array.from({ length: 4999 }, () => '\t未命名\t'),
+    '5001\t超限\t女', '5002\t更后\t男'].join('\n');
+  const preview = parsePastedStudents(text);
+  expect(preview.rows).toEqual([{ studentNumber: '001', name: '甲', gender: 'male' }]);
+  expect(preview.errors).toHaveLength(5000);
+  expect(preview.errors.at(-1)).toEqual({ line: 5003, message: expect.stringContaining('5,000') });
+  expect(preview.errors.every(({ line }) => line <= 5003)).toBe(true);
+});
+
+test('caps error output from a large malformed TSV below the action body limit', () => {
+  const preview = parsePastedStudents(Array.from({ length: 25000 }, () => '\t\t未知\t多余').join('\n'));
+  expect(preview.rows).toEqual([]);
+  expect(preview.errors).toHaveLength(5000 * 4 + 1);
+  expect(preview.errors.at(-1)).toEqual({ line: 5001, message: expect.stringContaining('5,000') });
+});

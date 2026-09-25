@@ -1,10 +1,27 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../../db/client';
-import { classes, students } from '../../db/schema';
-import { requireClassAccess } from '../../lib/access';
+import { user } from '../../db/auth-schema';
+import { classes, classTeachers, students } from '../../db/schema';
+import { ForbiddenError, requireClassAccess, requireSession } from '../../lib/access';
 import { MAX_STUDENT_ROWS, type StudentRow } from './parse';
 
 export type Student = typeof students.$inferSelect;
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function requireMutationAccess(tx: Transaction, classId: string, userId: string): Promise<void> {
+  const [target] = await tx.select({ archived: classes.archived }).from(classes)
+    .where(eq(classes.id, classId)).for('update');
+  if (!target || target.archived) throw new ForbiddenError('班级不存在或已归档');
+  const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
+    .from(user).where(eq(user.id, userId)).for('share');
+  if (!identity || identity.banned) throw new ForbiddenError('账号不可用');
+  if (identity.mustChangePassword) throw new ForbiddenError('请先修改密码');
+  if (identity.role === 'admin') return;
+  if (identity.role !== 'user') throw new ForbiddenError();
+  const [membership] = await tx.select({ classId: classTeachers.classId }).from(classTeachers)
+    .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, userId))).for('share');
+  if (!membership) throw new ForbiddenError();
+}
 
 function validateRows(rows: StudentRow[]): void {
   if (!Array.isArray(rows) || rows.length === 0 || rows.length > MAX_STUDENT_ROWS) {
@@ -24,12 +41,10 @@ function validateRows(rows: StudentRow[]): void {
 }
 
 export async function importStudents(classId: string, rows: StudentRow[]): Promise<{ inserted: number; updated: number }> {
-  await requireClassAccess(classId);
+  const { userId } = await requireSession();
   validateRows(rows);
   return db.transaction(async (tx) => {
-    // Serialize imports and assignment changes for this class before counting inserts.
-    const [target] = await tx.select({ archived: classes.archived }).from(classes).where(eq(classes.id, classId)).for('update');
-    if (!target || target.archived) throw new Error('班级不存在或已归档');
+    await requireMutationAccess(tx, classId, userId);
     const existing = await tx.select({ studentNumber: students.studentNumber }).from(students)
       .where(and(eq(students.classId, classId), inArray(students.studentNumber, rows.map((row) => row.studentNumber))));
     await tx.insert(students).values(rows.map((row) => ({ ...row, classId })))
@@ -46,12 +61,15 @@ export async function listStudents(classId: string): Promise<Student[]> {
 }
 
 async function setArchived(classId: string, studentId: number, archived: boolean): Promise<void> {
-  await requireClassAccess(classId);
+  const { userId } = await requireSession();
   if (!Number.isSafeInteger(studentId) || studentId <= 0) throw new Error('学生编号无效');
-  const result = await db.update(students).set({ archived })
-    .where(and(eq(students.classId, classId), eq(students.id, studentId), eq(students.archived, !archived)))
-    .returning({ id: students.id });
-  if (!result.length) throw new Error('学生不存在或状态未变化');
+  await db.transaction(async (tx) => {
+    await requireMutationAccess(tx, classId, userId);
+    const result = await tx.update(students).set({ archived })
+      .where(and(eq(students.classId, classId), eq(students.id, studentId), eq(students.archived, !archived)))
+      .returning({ id: students.id });
+    if (!result.length) throw new Error('学生不存在或状态未变化');
+  });
 }
 
 export async function archiveStudent(classId: string, studentId: number): Promise<void> {

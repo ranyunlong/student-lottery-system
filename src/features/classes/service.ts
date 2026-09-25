@@ -196,6 +196,8 @@ export async function assignTeacher(classId: string, teacherId: string): Promise
 export async function removeTeacher(classId: string, teacherId: string): Promise<void> {
   const actorId = await requireAdmin();
   await db.transaction(async (tx) => {
+    const [target] = await tx.select({ id: classes.id }).from(classes).where(eq(classes.id, classId)).for('update');
+    if (!target) throw new Error('班级不存在');
     const removed = await tx.delete(classTeachers).where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, teacherId))).returning();
     if (!removed.length) throw new Error('班级老师分配不存在');
     await tx.insert(adminAudit).values({ actorId, classId, targetUserId: teacherId, action: 'class.teacher.remove' });

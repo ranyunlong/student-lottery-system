@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
 import { classes, classTeachers, students } from '../../db/schema';
 import { auth } from '../../lib/auth';
+import { removeTeacher } from '../classes/service';
 import { importStudents, listStudents, archiveStudent, restoreStudent } from './service';
 import { importPastedStudentsAction, archiveStudentAction, restoreStudentAction } from './actions';
 
@@ -100,4 +101,96 @@ test('TSV confirmation ignores preview rows and removed teacher old session is r
   await expect(restoreStudentAction(archive)).rejects.toThrow();
   activeCookie = adminCookie;
   expect((await listStudents(classId)).some((row) => row.studentNumber === '006')).toBe(false);
+});
+
+async function holdClassRow(id: string) {
+  let release!: () => void;
+  let locked!: () => void;
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transaction = db.transaction(async (tx) => {
+    await tx.select({ id: classes.id }).from(classes).where(eq(classes.id, id)).for('update');
+    locked();
+    await gate;
+  });
+  await acquired;
+  return { release, transaction };
+}
+
+async function lockWaitOrOutcome(operation: Promise<unknown>): Promise<'blocked' | 'resolved' | 'rejected'> {
+  let outcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+  void operation.then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (outcome !== 'pending') return outcome;
+    const result = await pool.query<{ blocked: boolean }>(`SELECT EXISTS (
+      SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+        AND datname = current_database() AND wait_event_type = 'Lock'
+        AND (lower(query) LIKE '%classes%' OR lower(query) LIKE '%admin_audit%')
+    ) AS blocked`);
+    if (result.rows[0].blocked) return 'blocked';
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('写事务未进入班级行锁等待');
+}
+
+test.each(['import', 'archive', 'restore'] as const)('%s rejects a revoked teacher after an authorized old-session precheck', async (mode) => {
+  activeCookie = teacherCookie;
+  const id = randomUUID();
+  await db.insert(classes).values({ id, name: '撤权竞态班' });
+  await db.insert(classTeachers).values({ classId: id, teacherId });
+  const [student] = await db.insert(students).values({ classId: id, studentNumber: '001', name: '未变', archived: mode === 'restore' })
+    .returning({ id: students.id });
+  const held = await holdClassRow(id);
+  const operation = mode === 'import'
+    ? importStudents(id, [{ studentNumber: '001', name: '越权更新', gender: null }])
+    : mode === 'archive' ? archiveStudent(id, student.id) : restoreStudent(id, student.id);
+  try {
+    expect(await lockWaitOrOutcome(operation)).toBe('blocked');
+    await db.delete(classTeachers).where(and(eq(classTeachers.classId, id), eq(classTeachers.teacherId, teacherId)));
+  } finally {
+    held.release();
+    await held.transaction;
+  }
+  await expect(operation).rejects.toThrow('无权访问班级');
+  const [unchanged] = await db.select().from(students).where(eq(students.id, student.id));
+  expect(unchanged).toMatchObject({ name: '未变', archived: mode === 'restore' });
+});
+
+test('removeTeacher waits on the class row lock before committing revocation', async () => {
+  const id = randomUUID();
+  await db.insert(classes).values({ id, name: '串行移除班' });
+  await db.insert(classTeachers).values({ classId: id, teacherId });
+  const held = await holdClassRow(id);
+  activeCookie = adminCookie;
+  const removal = removeTeacher(id, teacherId);
+  let membershipUnlocked = false;
+  try {
+    expect(await lockWaitOrOutcome(removal)).toBe('blocked');
+    membershipUnlocked = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL statement_timeout = '300ms'`);
+      const member = await tx.select().from(classTeachers)
+        .where(and(eq(classTeachers.classId, id), eq(classTeachers.teacherId, teacherId))).for('share');
+      return member.length === 1;
+    }).catch(() => false);
+  } finally {
+    held.release();
+    await held.transaction;
+    await removal;
+  }
+  expect(membershipUnlocked).toBe(true);
+  expect(await db.select().from(classTeachers).where(eq(classTeachers.classId, id))).toEqual([]);
+}, 15000);
+
+test('TSV action bounds errors from many short invalid lines without writing students', async () => {
+  activeCookie = adminCookie;
+  const id = randomUUID();
+  await db.insert(classes).values({ id, name: '短行上限班' });
+  const form = new FormData();
+  form.set('classId', id);
+  form.set('text', Array.from({ length: 12000 }, () => '\t\t未知\t多余').join('\n'));
+  const result = await importPastedStudentsAction(form);
+  expect(result.ok).toBe(false);
+  expect(result.errors).toHaveLength(5000 * 4 + 1);
+  expect(result.errors?.at(-1)).toEqual({ line: 5001, message: expect.stringContaining('5,000') });
+  expect(await db.select().from(students).where(eq(students.classId, id))).toEqual([]);
 });
