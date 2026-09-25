@@ -22,11 +22,15 @@ export function pickWeightedPrize(
   }
 
   const total = eligible.reduce((sum, { weight }) => {
-    if (!Number.isSafeInteger(weight) || !Number.isSafeInteger(sum + weight)) {
+    const nextTotal = sum + weight;
+    if (!Number.isSafeInteger(weight) || !Number.isSafeInteger(nextTotal)) {
       throw new Error('\u5956\u54c1\u6743\u91cd\u603b\u548c\u5fc5\u987b\u662f\u5b89\u5168\u6574\u6570');
     }
-    return sum + weight;
+    return nextTotal;
   }, 0);
+  if (total >= 2 ** 48) {
+    throw new Error('\u968f\u673a\u62bd\u6837\u8303\u56f4\u5fc5\u987b\u5c0f\u4e8e 2^48');
+  }
 
   const value = draw(total);
   if (!Number.isSafeInteger(value) || value < 0 || value >= total) {

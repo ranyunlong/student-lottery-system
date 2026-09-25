@@ -58,6 +58,52 @@ describe('pickWeightedPrize', () => {
     ).toThrow(/安全整数/);
   });
 
+  it('rejects a total range of 2^48 before calling draw', () => {
+    let drawCalls = 0;
+    let error: unknown;
+
+    try {
+      pickWeightedPrize(
+        [
+          { prizeId: 'A', quotaRemaining: 2 ** 47, stockRemaining: 2 ** 47 },
+          { prizeId: 'B', quotaRemaining: 2 ** 47, stockRemaining: 2 ** 47 },
+        ],
+        () => {
+          drawCalls += 1;
+          return 0;
+        },
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(drawCalls).toBe(0);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/2\^48/);
+  });
+
+  it('allows the largest crypto.randomInt maxExclusive and preserves its weight', () => {
+    const maxExclusive = 2 ** 48 - 1;
+    let receivedMax = 0;
+
+    expect(
+      pickWeightedPrize(
+        [
+          {
+            prizeId: 'largest',
+            quotaRemaining: maxExclusive,
+            stockRemaining: maxExclusive,
+          },
+        ],
+        (max) => {
+          receivedMax = max;
+          return max - 1;
+        },
+      ),
+    ).toBe('largest');
+    expect(receivedMax).toBe(maxExclusive);
+  });
+
   it.each([-1, 4, 1.5, Number.NaN])('rejects invalid draw value %s', (value) => {
     expect(() => pickWeightedPrize(options, () => value)).toThrow(/随机/);
   });
