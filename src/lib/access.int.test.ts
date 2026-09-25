@@ -54,6 +54,37 @@ test('disabled teacher cannot sign in', async () => {
   await db.update(user).set({ banned: true }).where(eq(user.id, created.user.id));
   await expect(auth.api.signInEmail({ body: { email, password: 'StrongPassword123!' } })).rejects.toThrow();
 });
+test('admin create-user marks a new teacher for password change by default', async () => {
+  const email = `${randomUUID()}@example.test`;
+  const created = await auth.api.createUser({ body: {
+    email, name: 'Teacher without explicit flag', password: 'TemporaryPassword123!', role: 'user',
+  } });
+  const [stored] = await db.select({ mustChangePassword: user.mustChangePassword }).from(user).where(eq(user.id, created.user.id));
+  expect(stored.mustChangePassword).toBe(true);
+});
+test('admin password reset requires the target teacher to change password', async () => {
+  const adminEmail = `${randomUUID()}@example.test`;
+  const targetEmail = `${randomUUID()}@example.test`;
+  await auth.api.createUser({ body: {
+    email: adminEmail, name: 'Password reset admin', password: 'AdminPassword123!', role: 'admin',
+  } });
+  const target = await auth.api.createUser({ body: {
+    email: targetEmail, name: 'Password reset target', password: 'OldPassword123!', role: 'user',
+  } });
+  await db.update(user).set({ mustChangePassword: false }).where(eq(user.id, target.user.id));
+  const signedIn = await auth.api.signInEmail({ body: { email: adminEmail, password: 'AdminPassword123!' }, asResponse: true });
+  const cookie = signedIn.headers.get('set-cookie')?.split(';')[0] ?? '';
+  const headers = new Headers({ cookie });
+  await auth.api.changePassword({ headers, body: { currentPassword: 'AdminPassword123!', newPassword: 'PermanentAdmin123!' } });
+  const response = await auth.handler(new Request('http://localhost:3000/api/auth/admin/set-user-password', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: target.user.id, newPassword: 'NewTemporary123!' }),
+  }));
+  expect(response.status).toBe(200);
+  const [stored] = await db.select({ mustChangePassword: user.mustChangePassword }).from(user).where(eq(user.id, target.user.id));
+  expect(stored.mustChangePassword).toBe(true);
+});
 test('first login forces password change', async () => {
   const email = `${randomUUID()}@example.test`;
   const created = await auth.api.createUser({ body: {

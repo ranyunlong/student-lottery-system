@@ -15,6 +15,15 @@ export const auth = betterAuth({
       mustChangePassword: { type: 'boolean', required: false, defaultValue: false, input: false },
     },
   },
+  databaseHooks: {
+    user: {
+      create: {
+        async before(newUser) {
+          return { data: { ...newUser, mustChangePassword: true } };
+        },
+      },
+    },
+  },
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
       if (['/change-password', '/sign-out', '/get-session'].includes(ctx.path)) return;
@@ -28,11 +37,16 @@ export const auth = betterAuth({
       }
     }),
     after: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== '/change-password' || !ctx.context.session) return;
       const returned = ctx.context.returned;
       if (!returned || isAPIError(returned) || (returned instanceof Response && !returned.ok)) return;
-      await db.update(authSchema.user).set({ mustChangePassword: false })
-        .where(eq(authSchema.user.id, ctx.context.session.user.id));
+      if (ctx.path === '/change-password' && ctx.context.session) {
+        await db.update(authSchema.user).set({ mustChangePassword: false })
+          .where(eq(authSchema.user.id, ctx.context.session.user.id));
+      }
+      if (ctx.path === '/admin/set-user-password' && typeof ctx.body.userId === 'string') {
+        await db.update(authSchema.user).set({ mustChangePassword: true })
+          .where(eq(authSchema.user.id, ctx.body.userId));
+      }
     }),
   },
   plugins: [admin()],
