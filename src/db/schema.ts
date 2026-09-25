@@ -15,6 +15,13 @@ export const classes = pgTable('classes', {
   createdAt: createdAt(),
 });
 
+export const emblemCleanup = pgTable('emblem_cleanup', {
+  storageName: text('storage_name').primaryKey(),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: createdAt(),
+});
+
 export const classTeachers = pgTable('class_teachers', {
   classId: uuid('class_id').notNull().references(() => classes.id),
   teacherId: text('teacher_id').notNull().references(() => user.id),

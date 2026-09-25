@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import sharp from 'sharp';
 import { db } from '../../db/client';
-import { classes } from '../../db/schema';
+import { classes, emblemCleanup } from '../../db/schema';
 
 export type EmblemFormat = 'png' | 'jpeg' | 'webp';
 export const EMBLEM_MIME: Record<EmblemFormat, string> = {
@@ -45,9 +45,8 @@ export async function saveEmblem(classId: string, bytes: Uint8Array): Promise<st
   const path = join(directory, name);
   await mkdir(directory, { recursive: true });
   let created = false;
-  let previous: string | null;
   try {
-    previous = await db.transaction(async (tx) => {
+    await db.transaction(async (tx) => {
       const [target] = await tx.select({ emblemPath: classes.emblemPath }).from(classes)
         .where(eq(classes.id, classId)).for('update');
       if (!target) throw new Error('班级不存在');
@@ -55,24 +54,59 @@ export async function saveEmblem(classId: string, bytes: Uint8Array): Promise<st
       created = true;
       try { await handle.writeFile(bytes); } finally { await handle.close(); }
       await tx.update(classes).set({ emblemPath: name }).where(eq(classes.id, classId));
-      return target.emblemPath;
+      if (target.emblemPath && namePattern.test(target.emblemPath)) {
+        await tx.insert(emblemCleanup).values({ storageName: target.emblemPath }).onConflictDoNothing();
+      }
     });
   } catch (error) {
     if (created) await unlink(path);
     throw error;
   }
-  if (previous && previous !== name && namePattern.test(previous)) {
-    const [stillReferenced] = await db.select({ id: classes.id }).from(classes)
-      .where(eq(classes.emblemPath, previous)).limit(1);
-    if (!stillReferenced) {
+  await retryEmblemCleanup(directory);
+  return name;
+}
+
+async function retryEmblemCleanup(directory: string): Promise<void> {
+  let pending: { storageName: string }[];
+  try {
+    pending = await db.select({ storageName: emblemCleanup.storageName }).from(emblemCleanup);
+  } catch (error) {
+    console.error('Emblem cleanup discovery failed; pending records remain for retry', error);
+    return;
+  }
+  for (const { storageName } of pending) {
+    try {
+      await db.transaction(async (tx) => {
+        const [task] = await tx.select({ storageName: emblemCleanup.storageName }).from(emblemCleanup)
+          .where(eq(emblemCleanup.storageName, storageName)).for('update');
+        if (!task) return;
+        if (!namePattern.test(storageName)) throw new Error('Invalid emblem cleanup filename');
+        // Uploads only introduce fresh names. A GET of the old name must finish
+        // before the last replacement commits, because GET holds a shared row lock.
+        // Do not lock referenced rows here: replacement locks them before queuing
+        // cleanup, so the reverse lock order would deadlock concurrent uploads.
+        const [referenced] = await tx.select({ id: classes.id }).from(classes)
+          .where(eq(classes.emblemPath, storageName)).limit(1);
+        if (referenced) return;
+        try {
+          await unlink(join(directory, storageName));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        await tx.delete(emblemCleanup).where(eq(emblemCleanup.storageName, storageName));
+      });
+    } catch (error) {
+      console.error(`Emblem cleanup failed for ${storageName}; pending record retained`, error);
       try {
-        await unlink(join(directory, previous));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await db.update(emblemCleanup).set({
+          attempts: sql`${emblemCleanup.attempts} + 1`,
+          lastError: String(error),
+        }).where(eq(emblemCleanup.storageName, storageName));
+      } catch (recordError) {
+        console.error(`Emblem cleanup failure recording failed for ${storageName}`, recordError);
       }
     }
   }
-  return name;
 }
 
 export async function saveUploadedEmblem(classId: string, file: FormDataEntryValue | null): Promise<string> {

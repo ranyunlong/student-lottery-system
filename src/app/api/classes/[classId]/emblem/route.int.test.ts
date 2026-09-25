@@ -6,7 +6,7 @@ import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import sharp from 'sharp';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { db, pool } from '../../../../../db/client';
-import { classes, classTeachers } from '../../../../../db/schema';
+import { classes, classTeachers, emblemCleanup } from '../../../../../db/schema';
 import { saveEmblem } from '../../../../../features/classes/emblem';
 import { auth } from '../../../../../lib/auth';
 import { GET, POST } from './route';
@@ -14,6 +14,7 @@ import { GET, POST } from './route';
 let activeCookie = '';
 vi.mock('next/headers', () => ({ headers: async () => new Headers({ cookie: activeCookie }) }));
 const readGate = vi.hoisted(() => ({ wait: null as Promise<void> | null, entered: null as (() => void) | null }));
+const cleanupFaults = vi.hoisted(() => ({ unlinkName: null as string | null }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return { ...real, readFile: async (...args: Parameters<typeof real.readFile>) => {
@@ -22,6 +23,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       await readGate.wait;
     }
     return real.readFile(...args);
+  }, unlink: async (...args: Parameters<typeof real.unlink>) => {
+    if (cleanupFaults.unlinkName && String(args[0]).endsWith(cleanupFaults.unlinkName)) {
+      throw Object.assign(new Error('injected emblem unlink failure'), { code: 'EACCES' });
+    }
+    return real.unlink(...args);
   } };
 });
 
@@ -182,6 +188,8 @@ test('cleanup preserves an old file while another class still references it', as
   await db.update(classes).set({ emblemPath: original.emblemPath }).where(eq(classes.id, foreignId));
   expect((await upload(classId, 'image/png')).status).toBe(200);
   expect(await readdir(directory)).toContain(original.emblemPath);
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, original.emblemPath!)))
+    .toHaveLength(1);
   const sharedImage = await GET(new Request(url(foreignId)), context(foreignId));
   expect(sharedImage.status).toBe(200);
   expect(Buffer.from(await sharedImage.arrayBuffer())).toEqual(jpeg);
@@ -189,4 +197,136 @@ test('cleanup preserves an old file while another class still references it', as
   const refs = await db.select({ emblemPath: classes.emblemPath }).from(classes)
     .where(inArray(classes.id, [classId, foreignId]));
   expect((await readdir(directory)).sort()).toEqual(refs.map((row) => row.emblemPath).filter(Boolean).sort());
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, original.emblemPath!)))
+    .toHaveLength(0);
+});
+
+test('concurrent replacements drain a pending shared file without losing current emblems', async () => {
+  activeCookie = adminCookie;
+  const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  const [foreignBefore] = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+    .where(eq(classes.id, foreignId));
+  await db.update(classes).set({ emblemPath: old.emblemPath }).where(eq(classes.id, foreignId));
+  if (foreignBefore.emblemPath) {
+    await db.insert(emblemCleanup).values({ storageName: foreignBefore.emblemPath }).onConflictDoNothing();
+  }
+  expect((await upload(classId, 'image/png')).status).toBe(200);
+  const results = await Promise.all([upload(classId, 'image/png'), upload(foreignId, 'image/png')]);
+  expect(results.map((result) => result.status)).toEqual([200, 200]);
+  const refs = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+    .where(inArray(classes.id, [classId, foreignId]));
+  expect((await readdir(directory)).sort()).toEqual(refs.map((row) => row.emblemPath).sort());
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
+    .toHaveLength(0);
+});
+
+test('post-commit cleanup query failure does not report a committed upload as failed', async () => {
+  activeCookie = adminCookie;
+  const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  const originalSelect = db.select.bind(db);
+  const spy = vi.spyOn(db, 'select').mockImplementation((fields) => {
+    if (fields && typeof fields === 'object'
+      && ('storageName' in fields || (Object.keys(fields).length === 1 && fields.id === classes.id))) {
+      throw new Error('injected cleanup query failure');
+    }
+    return originalSelect(fields);
+  });
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let response: Response;
+  try {
+    response = await upload(classId, 'image/png');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('discovery failed'), expect.any(Error));
+  }
+  finally { spy.mockRestore(); log.mockRestore(); }
+  expect(response.status).toBe(200);
+  const [current] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  expect(current.emblemPath).toBe((await response.json()).name);
+  expect(await readdir(directory)).toContain(old.emblemPath);
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
+    .toHaveLength(1);
+  expect((await upload(classId, 'image/png')).status).toBe(200);
+  expect(await readdir(directory)).not.toContain(old.emblemPath);
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
+    .toHaveLength(0);
+});
+
+test('post-commit unlink failure does not report a committed upload as failed', async () => {
+  activeCookie = adminCookie;
+  const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  cleanupFaults.unlinkName = old.emblemPath;
+  let response: Response;
+  try { response = await upload(classId, 'image/png'); } finally { cleanupFaults.unlinkName = null; }
+  expect(response.status).toBe(200);
+  const [current] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  expect(current.emblemPath).toBe((await response.json()).name);
+  expect(await readdir(directory)).toContain(old.emblemPath);
+  const [pending] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!));
+  expect(pending).toMatchObject({ attempts: 1, lastError: expect.stringContaining('injected emblem unlink failure') });
+  expect((await upload(classId, 'image/png')).status).toBe(200);
+  expect(await readdir(directory)).not.toContain(old.emblemPath);
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
+    .toHaveLength(0);
+});
+
+test('persistent cleanup failures remain visible and retries preserve the current file', async () => {
+  activeCookie = adminCookie;
+  const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+  cleanupFaults.unlinkName = old.emblemPath;
+  try {
+    expect((await upload(classId, 'image/png')).status).toBe(200);
+    expect((await upload(classId, 'image/png')).status).toBe(200);
+    const [pending] = await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!));
+    expect(pending.attempts).toBe(2);
+    expect(pending.lastError).toContain('injected emblem unlink failure');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(old.emblemPath!), expect.any(Error));
+    const refs = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+      .where(inArray(classes.id, [classId, foreignId]));
+    expect((await readdir(directory)).sort()).toEqual(
+      [old.emblemPath, ...refs.map((row) => row.emblemPath)].sort(),
+    );
+    const image = await GET(new Request(url(classId)), context(classId));
+    expect(image.status).toBe(200);
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(png);
+  } finally {
+    cleanupFaults.unlinkName = null;
+    log.mockRestore();
+  }
+  expect((await upload(classId, 'image/png')).status).toBe(200);
+  expect(await db.select().from(emblemCleanup).where(eq(emblemCleanup.storageName, old.emblemPath!)))
+    .toHaveLength(0);
+  const refs = await db.select({ emblemPath: classes.emblemPath }).from(classes)
+    .where(inArray(classes.id, [classId, foreignId]));
+  expect((await readdir(directory)).sort()).toEqual(refs.map((row) => row.emblemPath).sort());
+});
+
+test('retry does not remove a pending file referenced by another class during its GET', async () => {
+  activeCookie = adminCookie;
+  const [old] = await db.select({ emblemPath: classes.emblemPath }).from(classes).where(eq(classes.id, classId));
+  cleanupFaults.unlinkName = old.emblemPath;
+  try { expect((await upload(classId, 'image/png')).status).toBe(200); }
+  finally { cleanupFaults.unlinkName = null; }
+  await db.update(classes).set({ emblemPath: old.emblemPath }).where(eq(classes.id, foreignId));
+  const entered = new Promise<void>((resolve) => { readGate.entered = resolve; });
+  let release!: () => void;
+  readGate.wait = new Promise<void>((resolve) => { release = resolve; });
+  let reading: Promise<Response> | undefined;
+  let replacing: Promise<Response> | undefined;
+  try {
+    reading = GET(new Request(url(foreignId)), context(foreignId));
+    await entered;
+    replacing = upload(foreignId, 'image/png');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(await readdir(directory)).toContain(old.emblemPath);
+    release();
+    readGate.wait = null;
+    expect(Buffer.from(await (await reading).arrayBuffer())).toEqual(png);
+    expect((await replacing).status).toBe(200);
+    expect(await readdir(directory)).not.toContain(old.emblemPath);
+  } finally {
+    readGate.wait = null;
+    readGate.entered = null;
+    release();
+    await Promise.allSettled([reading, replacing]);
+  }
 });
