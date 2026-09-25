@@ -18,7 +18,7 @@
 - 模式一按本场奖品剩余数量与实时库存的较小值加权；模式二在同一场内每人最多中奖一次。
 - 每轮由老师手动停止；结果、库存扣减和流水在事务中完成，重复停止不得重复中奖。
 - 公网采用 HTTPS；数据库和班徽持久化，PostgreSQL 不对公网开放；首版单服务器。
-- 依赖使用 `--save-exact` 和 `package-lock.json`；Node 最低 20.9，本机 Node 24.19.0。Windows 上 npm 使用 `C:\Program Files\nodejs\npm.cmd`；Docker 命令可能需要沙箱授权。
+- 依赖使用 `--save-exact` 和 `package-lock.json`；项目运行时要求 Node >=24.15.0 <25。Windows 上 npm 使用 `C:\Program Files\nodejs\npm.cmd`；Docker 命令可能需要沙箱授权。
 - 每项功能先写失败测试并验证失败原因，再写最小实现、跑全量相关测试、检查改动并提交。生成的配置和迁移文件以构建及数据库集成测试验证。
 
 ## File Map
