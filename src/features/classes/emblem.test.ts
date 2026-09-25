@@ -10,13 +10,18 @@ import { GET, POST } from '../../app/api/classes/[classId]/emblem/route';
 import { uploadEmblemAction } from './actions';
 
 const state = vi.hoisted(() => ({ emblemPath: null as string | null, allowed: true, adminAllowed: true }));
-vi.mock('../../db/client', () => ({ db: {
-  select: () => ({ from: () => ({ where: () => ({ limit: async () => [{ emblemPath: state.emblemPath }] }) }) }),
-  update: () => ({ set: (values: { emblemPath: string }) => ({ where: () => ({ returning: async () => {
-    state.emblemPath = values.emblemPath;
-    return [{ id: 'class-id' }];
-  } }) }) }),
-} }));
+vi.mock('../../db/client', () => {
+  const fakeDb = {
+    select: (fields: { id?: unknown }) => ({ from: () => ({ where: () => ({
+      for: async () => [{ emblemPath: state.emblemPath }],
+      limit: async () => fields.id ? [] : [{ emblemPath: state.emblemPath }],
+    }) }) }),
+    update: () => ({ set: (values: { emblemPath: string }) => ({ where: async () => {
+      state.emblemPath = values.emblemPath;
+    } }) }),
+  };
+  return { db: { ...fakeDb, transaction: (run: (tx: typeof fakeDb) => Promise<unknown>) => run(fakeDb) } };
+});
 vi.mock('../../lib/access', () => {
   class ForbiddenError extends Error {}
   return {

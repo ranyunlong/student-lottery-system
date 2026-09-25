@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { eq } from 'drizzle-orm';
 import sharp from 'sharp';
@@ -42,15 +42,35 @@ export async function saveEmblem(classId: string, bytes: Uint8Array): Promise<st
   }
   const directory = emblemDirectory();
   const name = `${randomUUID()}.${format}`;
+  const path = join(directory, name);
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, name), bytes, { flag: 'wx' });
+  let created = false;
+  let previous: string | null;
   try {
-    const updated = await db.update(classes).set({ emblemPath: name })
-      .where(eq(classes.id, classId)).returning({ id: classes.id });
-    if (!updated.length) throw new Error('班级不存在');
+    previous = await db.transaction(async (tx) => {
+      const [target] = await tx.select({ emblemPath: classes.emblemPath }).from(classes)
+        .where(eq(classes.id, classId)).for('update');
+      if (!target) throw new Error('班级不存在');
+      const handle = await open(path, 'wx');
+      created = true;
+      try { await handle.writeFile(bytes); } finally { await handle.close(); }
+      await tx.update(classes).set({ emblemPath: name }).where(eq(classes.id, classId));
+      return target.emblemPath;
+    });
   } catch (error) {
-    await unlink(join(directory, name));
+    if (created) await unlink(path);
     throw error;
+  }
+  if (previous && previous !== name && namePattern.test(previous)) {
+    const [stillReferenced] = await db.select({ id: classes.id }).from(classes)
+      .where(eq(classes.emblemPath, previous)).limit(1);
+    if (!stillReferenced) {
+      try {
+        await unlink(join(directory, previous));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
   }
   return name;
 }
@@ -65,16 +85,19 @@ export async function saveUploadedEmblem(classId: string, file: FormDataEntryVal
 }
 
 export async function loadEmblem(classId: string): Promise<{ bytes: Buffer; mime: string } | null> {
-  const [target] = await db.select({ emblemPath: classes.emblemPath }).from(classes)
-    .where(eq(classes.id, classId)).limit(1);
-  const name = target?.emblemPath;
-  if (!name || !namePattern.test(name)) return null;
-  const format = name.split('.').at(-1) as EmblemFormat;
-  try {
-    const bytes = await readFile(join(emblemDirectory(), name));
-    return { bytes, mime: EMBLEM_MIME[format] };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
+  // Hold a shared row lock until the old file is fully in memory; replacements need an exclusive lock.
+  return db.transaction(async (tx) => {
+    const [target] = await tx.select({ emblemPath: classes.emblemPath }).from(classes)
+      .where(eq(classes.id, classId)).for('share');
+    const name = target?.emblemPath;
+    if (!name || !namePattern.test(name)) return null;
+    const format = name.split('.').at(-1) as EmblemFormat;
+    try {
+      const bytes = await readFile(join(emblemDirectory(), name));
+      return { bytes, mime: EMBLEM_MIME[format] };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  });
 }
