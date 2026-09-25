@@ -217,9 +217,10 @@ test('new password reset request from another admin has a separate audit after f
   const id = (await auth.api.createUser({ body: { email, name: 'Two admin reset target', password: 'OldPassword123!', role: 'user' } })).user.id;
   const firstRequestId = randomUUID();
   const secondRequestId = randomUUID();
+  const firstRequest = formData({ teacherId: id, temporaryPassword: 'FirstReset123!', requestId: firstRequestId });
   await rejectAuditAction('teacher.password.reset', 'UPDATE');
   try {
-    const first = await resetTeacherPasswordAction(formData({ teacherId: id, temporaryPassword: 'FirstReset123!', requestId: firstRequestId }));
+    const first = await resetTeacherPasswordAction(firstRequest);
     expect(first.ok).toBe(false);
   } finally { await allowAuditAction('teacher.password.reset', 'UPDATE'); }
 
@@ -235,9 +236,23 @@ test('new password reset request from another admin has a separate audit after f
   expect(JSON.stringify(events)).not.toContain('FirstReset123!');
   expect(JSON.stringify(events)).not.toContain('SecondReset123!');
   await expect(auth.api.signInEmail({ body: { email, password: 'SecondReset123!' } })).resolves.toBeTruthy();
+
+  activeCookie = adminCookie;
+  const staleRetry = await resetTeacherPasswordAction(firstRequest);
+  const firstPasswordWorks = await auth.api.signInEmail({ body: { email, password: 'FirstReset123!' } })
+    .then(() => true, () => false);
+  const secondPasswordStillWorks = await auth.api.signInEmail({ body: { email, password: 'SecondReset123!' } })
+    .then(() => true, () => false);
+  const firstAudit = (await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, id)))
+    .find((event) => event.action === 'teacher.password.reset' && (event.details as { requestId?: string }).requestId === firstRequestId);
+  expect({ staleRetryOk: staleRetry.ok, firstPasswordWorks, secondPasswordStillWorks,
+    firstAuditState: (firstAudit?.details as { state?: string; reconciliation?: string } | undefined)?.state,
+    reconciliation: (firstAudit?.details as { state?: string; reconciliation?: string } | undefined)?.reconciliation,
+  }).toEqual({ staleRetryOk: false, firstPasswordWorks: false, secondPasswordStillWorks: true,
+    firstAuditState: 'needs_reconciliation', reconciliation: 'manual_review_required' });
 });
 
-test('retrying the same password reset request reconciles its original audit row', async () => {
+test('unresolved password reset request is not automatically replayed', async () => {
   const email = `${randomUUID()}@example.test`;
   const id = (await auth.api.createUser({ body: { email, name: 'Same request target', password: 'OldPassword123!', role: 'user' } })).user.id;
   const requestId = randomUUID();
@@ -250,12 +265,14 @@ test('retrying the same password reset request reconciles its original audit row
 
   activeCookie = adminCookie;
   const retry = await resetTeacherPasswordAction(request);
-  expect(retry.ok).toBe(true);
+  expect(retry.ok).toBe(false);
   const events = await db.select().from(adminAudit).where(eq(adminAudit.targetUserId, id))
     .then((rows) => rows.filter((event) => event.action === 'teacher.password.reset'));
-  expect(events).toMatchObject([{ actorId: adminId, details: { requestId, state: 'completed' } }]);
+  expect(events).toMatchObject([{ actorId: adminId,
+    details: { requestId, state: 'needs_reconciliation', reconciliation: 'manual_review_required' } }]);
   expect(events).toHaveLength(1);
   expect(JSON.stringify(events)).not.toContain('SameReset123!');
+  await expect(auth.api.signInEmail({ body: { email, password: 'SameReset123!' } })).resolves.toBeTruthy();
 });
 
 test('new teacher creation does not reconcile another admin pending create', async () => {

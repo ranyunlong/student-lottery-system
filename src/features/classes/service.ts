@@ -143,9 +143,17 @@ export async function resetTeacherPassword(id: string, temporaryPassword: string
   const requestId = accountRequestId(requestIdInput);
   const requestAudit = await findAccountAudit(actorId, action, requestId);
   if (requestAudit && requestAudit.targetUserId !== id) throw new Error('请求编号已用于不同的账号');
-  const details = (requestAudit?.details ?? { requestId }) as AccountAuditDetails;
-  if (details.state === 'completed') return;
-  const auditId = requestAudit?.id ?? await startAccountAudit(actorId, action, id, details);
+  if (requestAudit) {
+    const details = (requestAudit.details ?? { requestId }) as AccountAuditDetails;
+    if (details.state === 'completed') return;
+    await setAccountAuditState(requestAudit.id, 'needs_reconciliation', {
+      ...details,
+      reconciliation: 'manual_review_required',
+    });
+    throw new Error('密码重置请求结果不确定，已拒绝自动重试，请人工核对审计记录');
+  }
+  const details = { requestId };
+  const auditId = await startAccountAudit(actorId, action, id, details);
   await performAuditedAccountChange(auditId, details, async () => {
     await auth.api.setUserPassword({ headers: await headers(), body: { userId: id, newPassword: password } });
   });
