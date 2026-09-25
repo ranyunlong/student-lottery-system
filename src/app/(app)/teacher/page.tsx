@@ -12,6 +12,7 @@ export default async function TeacherPage() {
         <span>{item.name}</span>
         <Link className="text-teal-800 hover:underline focus-visible:outline-2 focus-visible:outline-teal-700" href={'/classes/' + item.id + '/students'}>学生名单</Link>
         <Link className="text-teal-800 hover:underline focus-visible:outline-2 focus-visible:outline-teal-700" href={'/classes/' + item.id + '/prizes'}>奖品与库存</Link>
+        <Link className="text-teal-800 hover:underline focus-visible:outline-2 focus-visible:outline-teal-700" href={'/classes/' + item.id + '/lotteries'}>抽奖场次</Link>
       </li>)}
     </ul> : <p className="text-sm text-slate-600">尚未分配班级，请联系管理员。</p>}
   </section>;
