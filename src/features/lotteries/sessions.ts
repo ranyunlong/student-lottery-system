@@ -2,7 +2,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, lotteryRounds, lotterySessions, prizes, sessionPrizes, sessionStudents, students } from '../../db/schema';
-import { ForbiddenError, requireClassAccess, requireSession } from '../../lib/access';
+import { ForbiddenError, requireSession } from '../../lib/access';
 import type { SessionConfig, SessionView } from './types';
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -17,6 +17,21 @@ async function mutationAccess(tx: Transaction, classId: string, actorId: string)
   if (identity.mustChangePassword) throw new ForbiddenError('请先修改密码');
   if (identity.role === 'admin') return;
   if (identity.role !== 'user') throw new ForbiddenError();
+  const [membership] = await tx.select({ classId: classTeachers.classId }).from(classTeachers)
+    .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, actorId))).for('share');
+  if (!membership) throw new ForbiddenError();
+}
+
+async function readAccess(tx: Transaction, classId: string, actorId: string) {
+  const [target] = await tx.select({ archived: classes.archived }).from(classes)
+    .where(eq(classes.id, classId)).for('share');
+  if (!target) throw new ForbiddenError();
+  const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
+    .from(user).where(eq(user.id, actorId)).for('share');
+  if (!identity || identity.banned) throw new ForbiddenError('账号不可用');
+  if (identity.mustChangePassword) throw new ForbiddenError('请先修改密码');
+  if (identity.role === 'admin') return;
+  if (identity.role !== 'user' || target.archived) throw new ForbiddenError();
   const [membership] = await tx.select({ classId: classTeachers.classId }).from(classTeachers)
     .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, actorId))).for('share');
   if (!membership) throw new ForbiddenError();
@@ -132,20 +147,30 @@ export async function completeSession(sessionId: string): Promise<void> {
 
 export async function getSession(sessionId: string): Promise<SessionView> {
   const classId = await locate(sessionId);
-  await requireClassAccess(classId);
+  const { userId } = await requireSession();
   return db.transaction(async (tx) => {
-    const [row] = await tx.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId));
-    if (!row) throw new Error('场次不存在');
-    return { ...await readConfig(tx, sessionId, row), id: row.id, classId, status: row.status as SessionView['status'],
-      createdAt: row.createdAt, startedAt: row.startedAt, completedAt: row.completedAt };
+    await readAccess(tx, classId, userId);
+    return readSession(tx, sessionId);
   });
 }
 
 export async function listSessions(classId: string): Promise<SessionView[]> {
-  await requireClassAccess(classId);
-  const rows = await db.select({ id: lotterySessions.id }).from(lotterySessions).where(eq(lotterySessions.classId, classId))
-    .orderBy(asc(lotterySessions.createdAt), asc(lotterySessions.id));
-  return Promise.all(rows.map((row) => getSession(row.id)));
+  const { userId } = await requireSession();
+  return db.transaction(async (tx) => {
+    await readAccess(tx, classId, userId);
+    const rows = await tx.select({ id: lotterySessions.id }).from(lotterySessions).where(eq(lotterySessions.classId, classId))
+      .orderBy(asc(lotterySessions.createdAt), asc(lotterySessions.id));
+    const sessions: SessionView[] = [];
+    for (const row of rows) sessions.push(await readSession(tx, row.id));
+    return sessions;
+  });
+}
+
+async function readSession(tx: Transaction, sessionId: string): Promise<SessionView> {
+  const [row] = await tx.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId));
+  if (!row) throw new Error('场次不存在');
+  return { ...await readConfig(tx, sessionId, row), id: row.id, classId: row.classId, status: row.status as SessionView['status'],
+    createdAt: row.createdAt, startedAt: row.startedAt, completedAt: row.completedAt };
 }
 
 export async function requireActiveSession(sessionId: string): Promise<SessionView> {

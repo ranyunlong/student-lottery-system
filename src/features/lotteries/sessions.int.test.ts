@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, lotteryRounds, lotterySessions, prizes, sessionPrizes, sessionStudents, students } from '../../db/schema';
 import { auth } from '../../lib/auth';
+import { removeTeacher } from '../classes/service';
 import { activateSession, completeSession, createSession, getSession, listSessions, requireActiveSession, updateDraftSession } from './sessions';
 import { activateSessionAction, saveSessionAction } from './actions';
 
@@ -174,3 +175,60 @@ test('revocation while a write waits for the class lock leaves no draft', async 
   await expect(writing).rejects.toThrow('无权访问班级');
   expect(await db.select().from(lotterySessions).where(eq(lotterySessions.classId, id))).toEqual([]);
 });
+
+test.each(['single', 'list'] as const)('%s read cannot outlive a committed teacher revocation', async (kind) => {
+  cookie = teacherCookie;
+  const id = randomUUID();
+  await db.insert(classes).values({ id, name: '读取撤权班' });
+  await db.insert(classTeachers).values({ classId: id, teacherId });
+  const [{ id: candidate }] = await db.insert(students).values({ classId: id, studentNumber: '001', name: '保密学生' }).returning({ id: students.id });
+  const [{ id: reward }] = await db.insert(prizes).values({ classId: id, name: '保密奖品', stock: 1 }).returning({ id: prizes.id });
+  const sessionId = await createSession(id, { mode: 'student-prize', studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 1 }], perStudentLimit: 1 });
+
+  let release!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = db.transaction(async (tx) => {
+    await tx.execute(sql`LOCK TABLE session_students IN ACCESS EXCLUSIVE MODE`);
+    locked(); await gate;
+  });
+  await acquired;
+  const reading = kind === 'single' ? getSession(sessionId) : listSessions(id);
+  let removal: Promise<void> | undefined;
+  let removalState: 'pending' | 'finished' | 'failed' = 'pending';
+  let state: 'blocked' | 'finished' | 'failed' | undefined;
+  let readOutcome: PromiseSettledResult<unknown> | undefined;
+  try {
+    let readBlocked = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const result = await pool.query<{ blocked: boolean }>(`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()
+          AND wait_event_type = 'Lock' AND lower(query) LIKE '%session_students%') AS blocked`);
+      if (result.rows[0].blocked) { readBlocked = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(readBlocked).toBe(true);
+    cookie = adminCookie;
+    removal = removeTeacher(id, teacherId);
+    void removal.then(() => { removalState = 'finished'; }, () => { removalState = 'failed'; });
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (removalState !== 'pending') { state = removalState; break; }
+      const result = await pool.query<{ blocked: boolean }>(`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()
+          AND wait_event_type = 'Lock' AND lower(query) LIKE '%classes%') AS blocked`);
+      if (result.rows[0].blocked) { state = 'blocked'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    release();
+    await holder;
+    [readOutcome] = await Promise.allSettled([reading, removal]);
+  }
+  expect(state).toBe('blocked');
+  expect(readOutcome).toMatchObject({ status: 'fulfilled' });
+  const view = readOutcome?.status === 'fulfilled'
+    ? kind === 'single' ? readOutcome.value : (readOutcome.value as Awaited<ReturnType<typeof listSessions>>)[0]
+    : null;
+  expect(view).toMatchObject({ id: sessionId, studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 1 }] });
+  expect(await db.select().from(classTeachers).where(and(eq(classTeachers.classId, id), eq(classTeachers.teacherId, teacherId)))).toEqual([]);
+}, 15000);
