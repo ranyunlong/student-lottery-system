@@ -1,6 +1,7 @@
 'use server';
 
 import { requireAdmin } from '../../lib/access';
+import { saveUploadedEmblem } from './emblem';
 import { assignTeacher, archiveClass, createClass, createTeacher, disableTeacher, removeTeacher, resetTeacherPassword, updateTeacher, updateClass } from './service';
 
 export type ActionResult = { ok: boolean; message: string };
@@ -43,6 +44,10 @@ export async function createClassAction(data: FormData): Promise<ActionResult> {
 
 export async function updateClassAction(data: FormData): Promise<ActionResult> {
   return run(() => updateClass(field(data, 'classId'), field(data, 'name')), '班级名称已更新');
+}
+
+export async function uploadEmblemAction(data: FormData): Promise<ActionResult> {
+  return run(async () => { await saveUploadedEmblem(field(data, 'classId'), data.get('file')); }, '班徽已更新');
 }
 
 export async function assignTeacherAction(data: FormData): Promise<ActionResult> {

@@ -227,7 +227,7 @@ export async function listTeachers() {
 
 export async function listClasses() {
   await requireAdmin();
-  return db.select({ id: classes.id, name: classes.name, archived: classes.archived,
+  return db.select({ id: classes.id, name: classes.name, archived: classes.archived, emblemPath: classes.emblemPath,
     teacherId: classTeachers.teacherId, teacherName: user.name })
     .from(classes).leftJoin(classTeachers, eq(classTeachers.classId, classes.id))
     .leftJoin(user, eq(user.id, classTeachers.teacherId)).orderBy(asc(classes.name), asc(classes.id));

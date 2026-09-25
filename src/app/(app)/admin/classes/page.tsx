@@ -1,5 +1,6 @@
+import Image from 'next/image';
 import { ActionForm } from '../../../../components/action-form';
-import { archiveClassAction, assignTeacherAction, createClassAction, removeTeacherAction, updateClassAction } from '../../../../features/classes/actions';
+import { archiveClassAction, assignTeacherAction, createClassAction, removeTeacherAction, updateClassAction, uploadEmblemAction } from '../../../../features/classes/actions';
 import { listAdminAudit, listClasses, listTeachers } from '../../../../features/classes/service';
 import { requireAdminPage } from '../../../../lib/workspace-guard';
 
@@ -12,9 +13,9 @@ const actionLabels: Record<string, string> = {
 export default async function ClassesPage() {
   await requireAdminPage();
   const [rows, teachers, audit] = await Promise.all([listClasses(), listTeachers(), listAdminAudit()]);
-  const grouped = new Map<string, { name: string; archived: boolean; members: { id: string; name: string }[] }>();
+  const grouped = new Map<string, { name: string; archived: boolean; emblemPath: string | null; members: { id: string; name: string }[] }>();
   for (const row of rows) {
-    if (!grouped.has(row.id)) grouped.set(row.id, { name: row.name, archived: row.archived, members: [] });
+    if (!grouped.has(row.id)) grouped.set(row.id, { name: row.name, archived: row.archived, emblemPath: row.emblemPath, members: [] });
     if (row.teacherId) grouped.get(row.id)!.members.push({ id: row.teacherId, name: row.teacherName ?? '未知老师' });
   }
   const activeTeachers = teachers.filter((teacher) => !teacher.banned);
@@ -33,6 +34,17 @@ export default async function ClassesPage() {
         {[...grouped].map(([id, item]) => <li key={id} className="space-y-4 px-4 py-5">
           <div className="flex items-center gap-3"><h3 className="font-semibold">{item.name}</h3>
             {item.archived && <span className="text-xs text-slate-500">已归档</span>}</div>
+          <div className="flex flex-wrap items-center gap-4">
+            {item.emblemPath && <Image unoptimized width={64} height={64} alt={`${item.name}班徽`}
+              src={`/api/classes/${id}/emblem?v=${encodeURIComponent(item.emblemPath)}`}
+              className="h-16 w-16 rounded border border-slate-200 object-contain" />}
+            {!item.archived && <ActionForm action={uploadEmblemAction} label="更新班徽">
+              <input type="hidden" name="classId" value={id} />
+              <label className="flex flex-col gap-1 text-sm font-medium">上传班徽
+                <input className={input} type="file" name="file" accept="image/png,image/jpeg,image/webp" required />
+              </label>
+            </ActionForm>}
+          </div>
           {!item.archived && <ActionForm action={updateClassAction} label="保存名称">
             <input type="hidden" name="classId" value={id} />
             <label className="flex flex-col gap-1 text-sm font-medium">班级名称
