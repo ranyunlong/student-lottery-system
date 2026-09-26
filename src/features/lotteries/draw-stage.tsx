@@ -7,10 +7,11 @@ import { cancelRoundAction, startRoundAction, stopRoundAction } from './rounds.a
 export type DrawStageSession = {
   sessionId?: string;
   mode: 'student-prize' | 'prize-student';
-  candidates: { id: number; name: string; remaining: number }[];
+  candidates: { id: number; name: string; remaining: number; archived?: boolean }[];
   prizes: { id: string; name: string; stock: number; quotaRemaining: number }[];
   drawsRemaining: number;
   pendingToken?: string;
+  pendingStudentId?: number;
 };
 
 export type DrawStageActions = {
@@ -24,11 +25,11 @@ const pendingKey = (sessionId?: string) => 'student-lottery:pending-round:' + (s
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重试';
 
 export function DrawStage({ session, actions }: Props) {
-  const availableCandidates = useMemo(() => session.candidates.filter((item) => item.remaining > 0), [session.candidates]);
+  const availableCandidates = useMemo(() => session.candidates.filter((item) => item.remaining > 0 && !item.archived), [session.candidates]);
   const fixedPrize = session.prizes[0];
   const unavailableStudents = availableCandidates.length === 0 || session.drawsRemaining <= 0;
   const outOfStock = session.prizes.every((item) => item.stock <= 0 || item.quotaRemaining <= 0);
-  const [selectedStudent, setSelectedStudent] = useState(session.pendingToken && session.mode === 'student-prize' ? String(availableCandidates[0]?.id ?? '') : '');
+  const [selectedStudent, setSelectedStudent] = useState(session.pendingToken && session.mode === 'student-prize' ? String(session.pendingStudentId ?? availableCandidates[0]?.id ?? '') : '');
   const [token, setToken] = useState(session.pendingToken ?? '');
   const [running, setRunning] = useState(Boolean(session.pendingToken));
   const [busy, setBusy] = useState(false);
@@ -84,7 +85,7 @@ export function DrawStage({ session, actions }: Props) {
     <div className="border-y border-slate-200 py-6">
       {session.mode === 'student-prize' ? <label className="flex min-w-0 flex-col gap-2 text-sm font-medium text-slate-700">本轮学生
         <select aria-describedby="candidate-help" value={selectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy} className="min-h-11 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-teal-700">
-          <option value="">请选择学生</option>{session.candidates.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={candidate.remaining <= 0}>{candidate.name}（剩余 {candidate.remaining} 次）</option>)}
+          <option value="">请选择学生</option>{session.candidates.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={candidate.remaining <= 0 || candidate.archived}>{candidate.name}（剩余 {candidate.remaining} 次）</option>)}
         </select>
       </label> : <p className="min-h-11 rounded border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-medium">固定奖品：{fixedPrize?.name ?? '暂无奖品'}</p>}
       <div id="candidate-help" className="mt-3 grid min-w-0 grid-cols-2 gap-3 text-sm text-slate-600 sm:grid-cols-3"><p>可用学生 <strong className="text-slate-900">{availableCandidates.length}</strong> 人</p>{session.prizes.map((prize) => <p key={prize.id} className="min-w-0 break-words">{prize.name}：库存 {prize.stock} · 配额 {prize.quotaRemaining}</p>)}</div>

@@ -111,3 +111,19 @@ test('动画区域在 reduced motion 下仍可显示结果而不依赖定时器'
   vi.unstubAllGlobals();
 });
 
+
+
+test('刷新恢复 active round 时选中服务端返回的真实 B 学生', () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  render(<DrawStage session={{ ...session, candidates: [{ id: 1, name: 'A同学', remaining: 1 }, { id: 2, name: 'B同学', remaining: 1 }], pendingToken: 'round-b', pendingStudentId: 2 }} actions={actions()} />);
+  expect(screen.getByLabelText('本轮学生')).toHaveValue('2');
+  vi.unstubAllGlobals();
+});
+
+test('归档候选不能开始且不计入可用学生', () => {
+  const api = actions();
+  render(<DrawStage session={{ ...session, candidates: [{ id: 1, name: '已归档学生', remaining: 1, archived: true }] }} actions={api} />);
+  expect(screen.getByRole('option', { name: /已归档学生/ })).toBeDisabled();
+  expect(screen.getByText((_, element) => Boolean(element?.tagName === 'P' && element.textContent?.includes('可用学生') && element.textContent.includes('0')))).toBeVisible();
+  expect(screen.getByRole('button', { name: '开始抽奖' })).toBeDisabled();
+});
