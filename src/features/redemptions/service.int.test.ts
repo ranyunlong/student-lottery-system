@@ -8,7 +8,8 @@ import { auth } from '../../lib/auth';
 import { activateSession, createSession } from '../lotteries/sessions';
 import { startRound, stopRound } from '../lotteries/rounds';
 import { getPrizeStock } from '../prizes/service';
-import { correctRedemption, listRedemptionAudit, listWinnings, redeemWin } from './service';
+import { listAdminAudit } from '../classes/service';
+import { correctRedemption, findRedeemedWinForCorrection, listRedemptionAudit, listWinnings, redeemWin } from './service';
 import { correctRedemptionAction, redeemWinAction } from './actions';
 
 let cookie = '';
@@ -84,7 +85,7 @@ test('only an authenticated admin corrects a redeemed win with reason and audit'
       { actorId: teacherId, previousStatus: 'pending', newStatus: 'redeemed' },
       { actorId: adminId, previousStatus: 'redeemed', newStatus: 'pending', reason: '操作失误' },
     ]);
-    expect((await listRedemptionAudit()).some((event) => event.winningRecordId === f.winId && event.reason === '操作失误')).toBe(true);
+    expect((await listRedemptionAudit()).events.some((event) => event.winningRecordId === f.winId && event.reason === '操作失误')).toBe(true);
     await expect(correctRedemption(f.winId, '再纠正', adminId)).rejects.toThrow();
   } finally { cookie = teacherCookie; }
 });
@@ -191,3 +192,84 @@ test('correction waiting on class lock rechecks administrator role', async () =>
   expect((await db.select().from(winningRecords).where(eq(winningRecords.id, f.winId)))[0].redemptionStatus).toBe('redeemed');
   expect(await db.select().from(redemptionAudit).where(eq(redemptionAudit.winningRecordId, f.winId))).toHaveLength(1);
 }, 15000);
+
+test.each([
+  ['redemption_audit', () => listRedemptionAudit()],
+  ['admin_audit', () => listAdminAudit()],
+] as const)('%s audit read cannot return data after a committed demotion', async (table, read) => {
+  const f = await fixture();
+  await redeemWin(f.classId, f.winId, teacherId);
+  cookie = adminCookie;
+  const blocker = await pool.connect();
+  let started = false;
+  let reading: Promise<unknown> | undefined;
+  let demotion: Promise<unknown> | undefined;
+  try {
+    await blocker.query('BEGIN');
+    started = true;
+    await blocker.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
+    reading = read();
+    let blocked = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const activity = await pool.query<{ blocked: boolean }>(`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database()
+          AND wait_event_type = 'Lock' AND lower(query) LIKE $1) AS blocked`, [`%${table}%`]);
+      if (activity.rows[0].blocked) { blocked = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(blocked).toBe(true);
+    demotion = db.update(user).set({ role: 'user' }).where(eq(user.id, adminId));
+    const committedBeforeRead = await Promise.race([
+      demotion.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), 200)),
+    ]);
+    await blocker.query('ROLLBACK');
+    started = false;
+    if (committedBeforeRead) await expect(reading).rejects.toThrow('管理员');
+    else await expect(reading).resolves.toBeDefined();
+    await demotion;
+  } finally {
+    if (started) await blocker.query('ROLLBACK');
+    blocker.release();
+    if (reading) await reading.catch(() => undefined);
+    if (demotion) await demotion.catch(() => undefined);
+    await db.update(user).set({ role: 'admin' }).where(eq(user.id, adminId));
+    cookie = teacherCookie;
+  }
+}, 15000);
+
+test('older redeemed win remains browsable and correctable beyond the first audit page', async () => {
+  const older = await fixture();
+  await redeemWin(older.classId, older.winId, teacherId);
+  const later = await fixture();
+  await redeemWin(later.classId, later.winId, teacherId);
+  await db.insert(redemptionAudit).values(Array.from({ length: 101 }, (_, index) => ({
+    classId: later.classId, winningRecordId: later.winId, actorId: teacherId,
+    previousStatus: 'pending', newStatus: 'redeemed', reason: `后续事件 ${index}`,
+  })));
+  cookie = adminCookie;
+  try {
+    const first = await listRedemptionAudit();
+    expect(first.events).toHaveLength(50);
+    expect(first.events.some((event) => event.winningRecordId === older.winId)).toBe(false);
+    expect(await findRedeemedWinForCorrection(older.winId)).toMatchObject({ id: older.winId,
+      studentNumberSnapshot: '001', studentNameSnapshot: '原姓名', prizeNameSnapshot: '原奖品' });
+    let cursor = first.nextCursor;
+    let found = false;
+    for (let page = 0; cursor && page < 4; page++) {
+      const result = await listRedemptionAudit(cursor);
+      found ||= result.events.some((event) => event.winningRecordId === older.winId);
+      cursor = result.nextCursor;
+    }
+    expect(found).toBe(true);
+    const before = await getPrizeStock(older.prize.id);
+    await correctRedemption(older.winId, '历史记录误标', adminId);
+    expect((await db.select().from(winningRecords).where(eq(winningRecords.id, older.winId)))[0]).toMatchObject({
+      redemptionStatus: 'pending', studentNameSnapshot: '原姓名', prizeNameSnapshot: '原奖品',
+    });
+    expect(await getPrizeStock(older.prize.id)).toBe(before);
+    expect(await db.select().from(stockEvents).where(eq(stockEvents.winningRecordId, older.winId))).toHaveLength(1);
+    expect(await findRedeemedWinForCorrection(older.winId)).toBeNull();
+    await expect(listRedemptionAudit('invalid')).rejects.toThrow();
+  } finally { cookie = teacherCookie; }
+  await expect(findRedeemedWinForCorrection(older.winId)).rejects.toThrow('管理员');
+});

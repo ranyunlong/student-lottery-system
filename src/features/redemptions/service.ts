@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lt, or } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, redemptionAudit, winningRecords } from '../../db/schema';
@@ -6,6 +6,15 @@ import { ForbiddenError, requireAdmin, requireSession } from '../../lib/access';
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type WinningRecord = typeof winningRecords.$inferSelect & { redeemedByName: string | null };
+const auditPageSize = 50;
+
+async function adminReadAccess(tx: Transaction, actorId: string) {
+  const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
+    .from(user).where(eq(user.id, actorId)).for('share');
+  if (!identity || identity.banned || identity.mustChangePassword || identity.role !== 'admin') {
+    throw new ForbiddenError('需要管理员权限');
+  }
+}
 
 async function access(tx: Transaction, classId: string, actorId: string, write: boolean, adminOnly = false) {
   const [target] = await tx.select({ archived: classes.archived }).from(classes)
@@ -80,9 +89,18 @@ export async function correctRedemption(winId: string, reasonInput: string, admi
   });
 }
 
-export async function listRedemptionAudit() {
-  await requireAdmin();
-  return db.select({ id: redemptionAudit.id, classId: redemptionAudit.classId,
+export async function listRedemptionAudit(cursor?: string) {
+  const adminId = await requireAdmin();
+  return db.transaction(async (tx) => {
+    await adminReadAccess(tx, adminId);
+    let boundary: { id: string; createdAt: Date } | undefined;
+    if (cursor !== undefined) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursor)) throw new Error('审计游标无效');
+      [boundary] = await tx.select({ id: redemptionAudit.id, createdAt: redemptionAudit.createdAt })
+        .from(redemptionAudit).where(eq(redemptionAudit.id, cursor));
+      if (!boundary) throw new Error('审计游标无效');
+    }
+    const rows = await tx.select({ id: redemptionAudit.id, classId: redemptionAudit.classId,
     winningRecordId: redemptionAudit.winningRecordId, actorId: redemptionAudit.actorId,
     actorName: user.name, studentNumberSnapshot: winningRecords.studentNumberSnapshot,
     studentNameSnapshot: winningRecords.studentNameSnapshot, prizeNameSnapshot: winningRecords.prizeNameSnapshot,
@@ -91,5 +109,23 @@ export async function listRedemptionAudit() {
     reason: redemptionAudit.reason, createdAt: redemptionAudit.createdAt })
     .from(redemptionAudit).innerJoin(winningRecords, eq(winningRecords.id, redemptionAudit.winningRecordId))
     .innerJoin(user, eq(user.id, redemptionAudit.actorId))
-    .orderBy(desc(redemptionAudit.createdAt), desc(redemptionAudit.id)).limit(100);
+    .where(boundary ? or(lt(redemptionAudit.createdAt, boundary.createdAt),
+      and(eq(redemptionAudit.createdAt, boundary.createdAt), lt(redemptionAudit.id, boundary.id))) : undefined)
+    .orderBy(desc(redemptionAudit.createdAt), desc(redemptionAudit.id)).limit(auditPageSize + 1);
+    const events = rows.slice(0, auditPageSize);
+    return { events, nextCursor: rows.length > auditPageSize ? events.at(-1)!.id : null };
+  });
+}
+
+export async function findRedeemedWinForCorrection(winId: string) {
+  const adminId = await requireAdmin();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(winId)) throw new Error('中奖记录编号无效');
+  return db.transaction(async (tx) => {
+    await adminReadAccess(tx, adminId);
+    const [record] = await tx.select({ id: winningRecords.id, classId: winningRecords.classId,
+      studentNumberSnapshot: winningRecords.studentNumberSnapshot, studentNameSnapshot: winningRecords.studentNameSnapshot,
+      prizeNameSnapshot: winningRecords.prizeNameSnapshot, redeemedAt: winningRecords.redeemedAt })
+      .from(winningRecords).where(and(eq(winningRecords.id, winId), eq(winningRecords.redemptionStatus, 'redeemed')));
+    return record ?? null;
+  });
 }

@@ -245,9 +245,16 @@ export async function listTeacherClasses() {
 }
 
 export async function listAdminAudit() {
-  await requireAdmin();
-  return db.select({ id: adminAudit.id, actorId: adminAudit.actorId, action: adminAudit.action,
-    targetUserId: adminAudit.targetUserId, classId: adminAudit.classId, details: adminAudit.details,
-    createdAt: adminAudit.createdAt })
-    .from(adminAudit).orderBy(desc(adminAudit.createdAt), desc(adminAudit.id)).limit(50);
+  const adminId = await requireAdmin();
+  return db.transaction(async (tx) => {
+    const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
+      .from(user).where(eq(user.id, adminId)).for('share');
+    if (!identity || identity.banned || identity.mustChangePassword || identity.role !== 'admin') {
+      throw new ForbiddenError('需要管理员权限');
+    }
+    return tx.select({ id: adminAudit.id, actorId: adminAudit.actorId, action: adminAudit.action,
+      targetUserId: adminAudit.targetUserId, classId: adminAudit.classId, details: adminAudit.details,
+      createdAt: adminAudit.createdAt })
+      .from(adminAudit).orderBy(desc(adminAudit.createdAt), desc(adminAudit.id)).limit(50);
+  });
 }
