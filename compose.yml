@@ -89,6 +89,24 @@ services:
       retries: 3
       start_period: 30s
 
+  emblem-backup:
+    image: postgres:17-alpine
+    profiles: ["maintenance"]
+    network_mode: none
+    entrypoint: ["tar"]
+    command: ["-C", "/emblems", "-czf", "-", "."]
+    volumes:
+      - emblem-data:/emblems:ro
+
+  emblem-restore:
+    image: postgres:17-alpine
+    profiles: ["maintenance"]
+    network_mode: none
+    entrypoint: ["tar"]
+    command: ["-C", "/emblems", "-xzf", "-"]
+    volumes:
+      - emblem-data:/emblems
+
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped
