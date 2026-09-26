@@ -22,9 +22,9 @@ export default async function LotteriesPage({ params }: { params: Promise<{ clas
           <Link className="text-sm text-teal-800 hover:underline" href={`/classes/${classId}/lotteries/new?sessionId=${item.id}&mode=${item.mode}`}>编辑配置</Link>
           <ActionForm action={activateSessionAction} label="开始场次"><input type="hidden" name="sessionId" value={item.id} /></ActionForm>
         </div>}
-        {item.status === 'active' && <ActionForm action={completeSessionAction} label="结束场次" confirm="确定结束这个场次？结束后不能继续抽取。">
+        {item.status === 'active' && <div className="flex flex-wrap items-center gap-4"><Link className="min-h-11 rounded border border-teal-700 px-4 py-2 text-sm font-medium text-teal-900 hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-teal-700" href={'/classes/' + classId + '/lotteries/' + item.id}>进入现场抽奖</Link><ActionForm action={completeSessionAction} label="结束场次" confirm="确定结束这个场次？结束后不能继续抽取。">
           <input type="hidden" name="sessionId" value={item.id} />
-        </ActionForm>}
+        </ActionForm></div>}
       </li>)}
     </ul> : <p className="text-sm text-slate-600">暂无场次。</p>}
   </section>;

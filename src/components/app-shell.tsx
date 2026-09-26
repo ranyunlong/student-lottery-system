@@ -12,7 +12,7 @@ export function AppShell({ role, children }: { role: 'admin' | 'teacher'; childr
   const router = useRouter();
   const links = role === 'admin'
     ? [{ href: '/admin/teachers', label: '老师账号' }, { href: '/admin/classes', label: '班级管理' }, { href: '/admin/audit', label: '审计记录' }]
-    : [{ href: '/teacher', label: '我的班级' }];
+    : [{ href: '/classes', label: '老师工作区' }];
 
   async function signOut() {
     await authClient.signOut();
@@ -32,8 +32,8 @@ export function AppShell({ role, children }: { role: 'admin' | 'teacher'; childr
     </header>
     <div className="mx-auto grid max-w-6xl gap-6 px-5 py-6 md:grid-cols-[11rem_minmax(0,1fr)]">
       <nav aria-label="工作区" className="flex gap-1 md:flex-col">
-        {links.map(({ href, label }) => <Link key={href} href={href} aria-current={pathname === href ? 'page' : undefined}
-          className={`rounded px-3 py-2 text-sm font-medium ${pathname === href ? 'bg-teal-100 text-teal-900' : 'text-slate-600 hover:bg-slate-200'}`}>
+        {links.map(({ href, label }) => <Link key={href} href={href} aria-current={pathname === href || (href === '/classes' && pathname.startsWith('/classes/')) ? 'page' : undefined}
+          className={`rounded px-3 py-2 text-sm font-medium ${(pathname === href || (href === '/classes' && pathname.startsWith('/classes/'))) ? 'bg-teal-100 text-teal-900' : 'text-slate-600 hover:bg-slate-200'}`}>
           {label}
         </Link>)}
       </nav>
