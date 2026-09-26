@@ -1,0 +1,126 @@
+name: ${COMPOSE_PROJECT_NAME:-student-lottery-system}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      BETTER_AUTH_URL: https://${DOMAIN:?DOMAIN is required}
+      EMBLEM_DIR: /var/lib/student-lottery/emblems
+    volumes:
+      - emblem-data:/var/lib/student-lottery/emblems
+    networks:
+      - private
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["sh", "-ec", "npm run db:migrate:docker && exec node server.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      EMBLEM_DIR: /var/lib/student-lottery/emblems
+      EMBLEM_CLEANUP_BATCH_SIZE: ${EMBLEM_CLEANUP_BATCH_SIZE:-50}
+      EMBLEM_CLEANUP_INTERVAL_SECONDS: ${EMBLEM_CLEANUP_INTERVAL_SECONDS:-900}
+    volumes:
+      - emblem-data:/var/lib/student-lottery/emblems
+    networks:
+      - private
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    command:
+      - sh
+      - -ec
+      - >-
+        mkdir -p /tmp/cleanup;
+        while :; do
+        if npm run emblem:cleanup -- --limit "$${EMBLEM_CLEANUP_BATCH_SIZE}";
+        then date -u +%s > /tmp/cleanup/last-success;
+        else date -u +%s > /tmp/cleanup/last-error;
+        fi;
+        sleep "$${EMBLEM_CLEANUP_INTERVAL_SECONDS}";
+        done
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test -s /tmp/cleanup/last-success
+          && { test ! -s /tmp/cleanup/last-error || test /tmp/cleanup/last-success -nt /tmp/cleanup/last-error; }
+          && now=$$(date +%s)
+          && last=$$(cat /tmp/cleanup/last-success)
+          && test $$((now - last)) -lt $$((EMBLEM_CLEANUP_INTERVAL_SECONDS * 2 + 60))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - public
+      - private
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres-data:
+  emblem-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  public:
+  private:
+    internal: true

@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.superpowers
+data
+backups
+*.log
+.env
+.env.*
+!.env.example
+Dockerfile*
+compose*.yml
+Caddyfile
+README.md

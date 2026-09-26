@@ -9,14 +9,17 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:webpack": "next build --webpack",
     "lint": "eslint .",
     "test": "vitest run",
     "test:db": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:docker": "drizzle-kit migrate",
     "admin:create": "tsx scripts/create-admin.ts",
-    "emblem:cleanup": "tsx scripts/retry-emblem-cleanup.ts"
+    "emblem:cleanup": "tsx scripts/retry-emblem-cleanup.ts",
+    "emblem:cleanup:docker": "tsx scripts/retry-emblem-cleanup.ts"
   },
   "dependencies": {
     "better-auth": "1.7.6",
