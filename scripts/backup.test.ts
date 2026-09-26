@@ -46,8 +46,26 @@ function makeHarness(runningServices = 'db app cleanup proxy', extraContainers =
 set -eu
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
 if [ "\${1:-}" = events ]; then
+  case " $* " in
+    *" --until "*)
+      if [ "$DOCKER_EVENT_QUERY_FAIL" = true ]; then
+        printf '%s\\n' 'simulated Docker event drain failure' >&2
+        exit 44
+      fi
+      if [ "$DOCKER_DELAY_WRITER_EVENT" = true ]; then
+        attempt=0
+        while [ ! -f "$EVENT_OBSERVED_FILE" ] && [ "$attempt" -lt 150 ]; do
+          sleep 0.02
+          attempt=$((attempt + 1))
+        done
+      fi
+      if [ -f "$EVENT_HISTORY_FILE" ]; then cat "$EVENT_HISTORY_FILE"; fi
+      exit 0
+      ;;
+  esac
   while [ ! -f "$EVENT_STOP_FILE" ]; do
     if [ -f "$EVENT_TRIGGER_FILE" ]; then
+      if [ "$DOCKER_DELAY_WRITER_EVENT" = true ]; then sleep 0.5; fi
       printf '%s\\n' 'start|cleanup'
       : > "$EVENT_OBSERVED_FILE"
       rm -f "$EVENT_TRIGGER_FILE"
@@ -59,6 +77,7 @@ fi
 case "$*" in
   *"compose ps --status running --services"*) cat "$SERVICE_STATE" ;;
   *"compose ps -q db"*) if grep -Fxq db "$SERVICE_STATE"; then printf '%s\\n' db-container; fi ;;
+  *"exec -T db date -u +%s"*) printf '%s\\n' 1800000000 ;;
   *"inspect --format"*) printf '%s\\n' task14-test-project ;;
   *"ps --filter label=com.docker.compose.project=task14-test-project"*) cat "$CONTAINER_STATE" ;;
   *" stop "*)
@@ -79,12 +98,18 @@ case "$*" in
     if [ "\${DOCKER_FAIL:-}" = emblem-backup ]; then exit 32; fi
     if [ "\${DOCKER_START_WRITER:-}" = true ]; then
       printf '%s\\n' 'cleanup-oneoff|cleanup|true' >> "$CONTAINER_STATE"
+      printf '%s\\n' 'start|cleanup' > "$EVENT_HISTORY_FILE"
       : > "$EVENT_TRIGGER_FILE"
-      attempt=0
-      while [ ! -f "$EVENT_OBSERVED_FILE" ] && [ "$attempt" -lt 100 ]; do
-        sleep 0.02
-        attempt=$((attempt + 1))
-      done
+      if [ "$DOCKER_DELAY_WRITER_EVENT" != true ]; then
+        attempt=0
+        while [ ! -f "$EVENT_OBSERVED_FILE" ] && [ "$attempt" -lt 100 ]; do
+          sleep 0.02
+          attempt=$((attempt + 1))
+        done
+      else
+        awk -F '|' '$2 != "cleanup" || $1 != "cleanup-oneoff"' "$CONTAINER_STATE" > "$CONTAINER_STATE.tmp"
+        mv "$CONTAINER_STATE.tmp" "$CONTAINER_STATE"
+      fi
     fi
     cat "$EMBLEM_ARCHIVE"
     ;;
@@ -117,8 +142,11 @@ esac
       BACKUP_TIMEOUT_SECONDS: '30',
       CONTAINER_STATE: shellPath(containerState),
       DOCKER_LOG: shellPath(path.join(root, 'docker.log')),
+      DOCKER_DELAY_WRITER_EVENT: 'false',
+      DOCKER_EVENT_QUERY_FAIL: 'false',
       EMBLEM_ARCHIVE: shellPath(archive),
       EVENT_OBSERVED_FILE: shellPath(path.join(root, 'event-observed')),
+      EVENT_HISTORY_FILE: shellPath(path.join(root, 'event-history')),
       EVENT_STOP_FILE: shellPath(path.join(root, 'event-stop')),
       EVENT_TRIGGER_FILE: shellPath(path.join(root, 'event-trigger')),
       PATH: `${shellPath(bin)}:/usr/bin:/bin`,
@@ -155,7 +183,7 @@ describe('backup.sh maintenance snapshot', () => {
     const proxyStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' proxy'));
     const appStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' app'));
     const cleanupStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' cleanup'));
-    const databaseDump = calls.findIndex((line) => line.includes('exec -T db'));
+    const databaseDump = calls.findIndex((line) => line.includes('pg_dump --clean'));
     const emblemDump = calls.findIndex((line) => line.includes('emblem-backup'));
     const appRestore = calls.findIndex((line) => line.includes('up -d --no-deps --wait --wait-timeout') && line.endsWith(' app'));
     const proxyRestore = calls.findIndex((line) => line.includes('up -d --no-deps --wait --wait-timeout') && line.endsWith(' proxy'));
@@ -166,7 +194,13 @@ describe('backup.sh maintenance snapshot', () => {
     expect(emblemDump).toBeGreaterThan(databaseDump);
     expect(appRestore).toBeGreaterThan(emblemDump);
     expect(proxyRestore).toBeGreaterThan(appRestore);
-    expect(calls.some((line) => line.startsWith('events --since '))).toBe(true);
+    const eventDrain = calls.findIndex((line) => line.startsWith('events --since ') && line.includes(' --until '));
+    const projectWriterChecks = calls
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.startsWith('ps --filter label=com.docker.compose.project='));
+    expect(calls.some((line) => line.startsWith('events --since ') && !line.includes(' --until '))).toBe(true);
+    expect(eventDrain).toBeGreaterThanOrEqual(0);
+    expect(projectWriterChecks.at(-1)?.index).toBeGreaterThan(eventDrain);
   });
 
   test('removes the incomplete staging set and restores prior services when volume backup fails', () => {
@@ -217,5 +251,33 @@ describe('backup.sh maintenance snapshot', () => {
     expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 app');
     expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 cleanup');
     expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 proxy');
+  });
+
+  test('drains a delayed writer-start event before publishing the snapshot', () => {
+    const harness = makeHarness();
+
+    const result = runBackup(harness, {
+      DOCKER_START_WRITER: 'true',
+      DOCKER_DELAY_WRITER_EVENT: 'true',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('writer container started during snapshot');
+    expect(readdirSync(harness.output)).toEqual([]);
+    const calls = readFileSync(harness.log, 'utf8');
+    expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 app');
+    expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 cleanup');
+    expect(calls).toContain('events --since ');
+    expect(calls).toMatch(/events --since .* --until /);
+  });
+
+  test('refuses to publish when the bounded Docker event drain fails', () => {
+    const harness = makeHarness();
+
+    const result = runBackup(harness, { DOCKER_EVENT_QUERY_FAIL: 'true' });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('event drain failure');
+    expect(readdirSync(harness.output)).toEqual([]);
   });
 });

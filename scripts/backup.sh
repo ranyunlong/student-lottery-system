@@ -41,6 +41,8 @@ BACKUP_EXIT_STATUS=0
 EVENT_WATCH_PID=''
 EVENT_LOG=''
 EVENT_ERROR_LOG=''
+EVENT_DRAIN_LOG=''
+EVENT_DRAIN_ERROR_LOG=''
 
 was_running() {
   printf '%s\n' "$RUNNING_SERVICES" | grep -Fxq "$1"
@@ -58,7 +60,7 @@ project_writer_containers() {
   containers=$(docker ps \
     --filter "label=com.docker.compose.project=$PROJECT_NAME" \
     --filter status=running \
-    --format '{{.ID}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.oneoff"}}')
+    --format '{{.ID}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.oneoff"}}') || return 1
   printf '%s\n' "$containers" | awk -F '|' '$2 == "app" || $2 == "cleanup"'
 }
 
@@ -107,19 +109,62 @@ assert_no_writer_starts() {
     return 1
   fi
 
-  stop_event_watch
-  writer_starts=$(awk -F '|' '$2 == "app" || $2 == "cleanup" { print }' "$EVENT_LOG")
-  if [ -n "$writer_starts" ]; then
-    echo 'writer container started during snapshot; refusing to publish this backup' >&2
-    printf '%s\n' "$writer_starts" >&2
+  daemon_seconds=$(docker compose exec -T db date -u +%s) || {
+    echo 'could not read Docker daemon clock from the running database container' >&2
+    return 1
+  }
+  case "$daemon_seconds" in
+    ''|*[!0-9]*) echo 'database container returned an invalid daemon-clock timestamp' >&2; return 1 ;;
+  esac
+  snapshot_until=$((daemon_seconds + 1))
+  EVENT_DRAIN_LOG="$STAGE_DIR/writer-start-events-drained.log"
+  EVENT_DRAIN_ERROR_LOG="$STAGE_DIR/docker-events-drain.err"
+  if ! timeout --foreground --kill-after=5s 30s \
+    docker events --since "$WATCH_SINCE" --until "$snapshot_until" \
+    --filter type=container \
+    --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+    --filter event=start \
+    --format '{{.Action}}|{{index .Actor.Attributes "com.docker.compose.service"}}' \
+    > "$EVENT_DRAIN_LOG" 2> "$EVENT_DRAIN_ERROR_LOG"; then
+    echo 'Docker writer-start event drain failed; refusing to publish this backup' >&2
+    if [ -s "$EVENT_DRAIN_ERROR_LOG" ]; then cat "$EVENT_DRAIN_ERROR_LOG" >&2; fi
     return 1
   fi
+
+  if ! kill -0 "$EVENT_WATCH_PID" 2>/dev/null; then
+    wait "$EVENT_WATCH_PID" 2>/dev/null || true
+    EVENT_WATCH_PID=''
+    echo 'Docker writer-start event monitor stopped during the snapshot' >&2
+    if [ -s "$EVENT_ERROR_LOG" ]; then cat "$EVENT_ERROR_LOG" >&2; fi
+    return 1
+  fi
+  stop_event_watch
   if [ -s "$EVENT_ERROR_LOG" ]; then
     echo 'Docker writer-start event monitor reported an error; refusing to publish this backup' >&2
     cat "$EVENT_ERROR_LOG" >&2
     return 1
   fi
-  rm -f -- "$EVENT_LOG" "$EVENT_ERROR_LOG"
+  if [ -s "$EVENT_DRAIN_ERROR_LOG" ]; then
+    echo 'Docker writer-start event drain reported an error; refusing to publish this backup' >&2
+    cat "$EVENT_DRAIN_ERROR_LOG" >&2
+    return 1
+  fi
+  writer_starts=$(awk -F '|' '$2 == "app" || $2 == "cleanup" { print }' "$EVENT_LOG" "$EVENT_DRAIN_LOG")
+  if [ -n "$writer_starts" ]; then
+    echo 'writer container started during snapshot; refusing to publish this backup' >&2
+    printf '%s\n' "$writer_starts" >&2
+    return 1
+  fi
+  if ! WRITER_CONTAINERS=$(project_writer_containers); then
+    echo 'final project-scoped writer check failed; refusing to publish this backup' >&2
+    return 1
+  fi
+  if [ -n "$WRITER_CONTAINERS" ]; then
+    echo 'project writer container is still running at snapshot end; refusing to publish this backup' >&2
+    printf '%s\n' "$WRITER_CONTAINERS" >&2
+    return 1
+  fi
+  rm -f -- "$EVENT_LOG" "$EVENT_ERROR_LOG" "$EVENT_DRAIN_LOG" "$EVENT_DRAIN_ERROR_LOG"
 }
 
 restore_service() {
@@ -179,7 +224,10 @@ if [ -z "$PROJECT_NAME" ]; then
   exit 1
 fi
 
-WATCH_SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+WATCH_SINCE=$(docker compose exec -T db date -u +%s)
+case "$WATCH_SINCE" in
+  ''|*[!0-9]*) echo 'database container returned an invalid Docker event start timestamp' >&2; exit 1 ;;
+esac
 validate_initial_writers
 if was_running app; then RESTORE_APP=1; fi
 if was_running cleanup; then RESTORE_CLEANUP=1; fi
