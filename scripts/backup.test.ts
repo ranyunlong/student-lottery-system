@@ -4,14 +4,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 
-const bash = 'C:\\Program Files\\Git\\bin\\bash.exe';
+const isWindows = process.platform === 'win32';
+const shell = isWindows ? process.env.TASK14_GIT_BASH ?? 'C:\\Program Files\\Git\\bin\\bash.exe' : '/bin/sh';
 const temporaryDirectories: string[] = [];
 
-function bashPath(value: string): string {
-  return execFileSync(bash, ['-lc', 'cygpath -u "$1"', '--', value], { encoding: 'utf8' }).trim();
+function shellPath(value: string): string {
+  if (!isWindows) return value;
+  return execFileSync(shell, ['-c', 'cygpath -u "$1"', 'sh', value], { encoding: 'utf8' }).trim();
 }
 
-function makeHarness(runningServices = 'db app cleanup proxy') {
+function runShell(args: string[], env?: NodeJS.ProcessEnv) {
+  return spawnSync(shell, args, { encoding: 'utf8', env });
+}
+
+function makeHarness(runningServices = 'db app cleanup proxy', extraContainers = '') {
   const root = mkdtempSync(path.join(os.tmpdir(), 'task14-backup-test-'));
   temporaryDirectories.push(root);
   const bin = path.join(root, 'bin');
@@ -22,36 +28,72 @@ function makeHarness(runningServices = 'db app cleanup proxy') {
   mkdirSync(output);
   writeFileSync(path.join(source, 'emblem.bin'), 'emblem');
 
-  const posixSource = bashPath(source);
   const archive = path.join(root, 'emblems.tar.gz');
-  execFileSync(bash, ['-lc', 'tar -czf "$1" -C "$2" .', '--', bashPath(archive), posixSource]);
-  const serviceState = path.join(root, 'running-services');
-  writeFileSync(serviceState, runningServices.split(' ').join('\n') + '\n');
+  const archiveResult = runShell(['-c', 'tar -czf "$1" -C "$2" .', 'sh', shellPath(archive), shellPath(source)]);
+  if (archiveResult.status !== 0) throw new Error(archiveResult.stderr);
 
-  const dockerStub = `#!/usr/bin/env bash
+  const serviceState = path.join(root, 'running-services');
+  const containerState = path.join(root, 'running-containers');
+  writeFileSync(serviceState, runningServices ? `${runningServices.split(' ').join('\n')}\n` : '');
+  const serviceContainers = runningServices
+    .split(' ')
+    .filter(Boolean)
+    .map((service) => `${service}-container|${service}|false`)
+    .join('\n');
+  writeFileSync(containerState, [serviceContainers, extraContainers].filter(Boolean).join('\n') + '\n');
+
+  const dockerStub = `#!/usr/bin/env sh
 set -eu
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
-case " $* " in
-  *" ps --status running --services "*) cat "$SERVICE_STATE" ;;
+if [ "\${1:-}" = events ]; then
+  while [ ! -f "$EVENT_STOP_FILE" ]; do
+    if [ -f "$EVENT_TRIGGER_FILE" ]; then
+      printf '%s\\n' 'start|cleanup'
+      : > "$EVENT_OBSERVED_FILE"
+      rm -f "$EVENT_TRIGGER_FILE"
+    fi
+    sleep 0.02
+  done
+  exit 0
+fi
+case "$*" in
+  *"compose ps --status running --services"*) cat "$SERVICE_STATE" ;;
+  *"compose ps -q db"*) if grep -Fxq db "$SERVICE_STATE"; then printf '%s\\n' db-container; fi ;;
+  *"inspect --format"*) printf '%s\\n' task14-test-project ;;
+  *"ps --filter label=com.docker.compose.project=task14-test-project"*) cat "$CONTAINER_STATE" ;;
   *" stop "*)
     shift 2
-    if [[ "$1" == "--timeout" ]]; then shift 2; fi
+    if [ "\${1:-}" = --timeout ]; then shift 2; fi
     for service in "$@"; do
       grep -Fxv "$service" "$SERVICE_STATE" > "$SERVICE_STATE.tmp" || true
       mv "$SERVICE_STATE.tmp" "$SERVICE_STATE"
+      awk -F '|' -v service="$service" '$2 != service || $3 == "true"' "$CONTAINER_STATE" > "$CONTAINER_STATE.tmp"
+      mv "$CONTAINER_STATE.tmp" "$CONTAINER_STATE"
     done
     ;;
   *" exec -T db "*)
-    if [[ "${'${'}DOCKER_FAIL:-}" == "pg_dump" ]]; then exit 31; fi
+    if [ "\${DOCKER_FAIL:-}" = pg_dump ]; then exit 31; fi
     printf 'fake-postgres-dump\\n'
     ;;
-  *" emblem-backup "*)
-    if [[ "${'${'}DOCKER_FAIL:-}" == "emblem-backup" ]]; then exit 32; fi
+  *"emblem-backup"*)
+    if [ "\${DOCKER_FAIL:-}" = emblem-backup ]; then exit 32; fi
+    if [ "\${DOCKER_START_WRITER:-}" = true ]; then
+      printf '%s\\n' 'cleanup-oneoff|cleanup|true' >> "$CONTAINER_STATE"
+      : > "$EVENT_TRIGGER_FILE"
+      attempt=0
+      while [ ! -f "$EVENT_OBSERVED_FILE" ] && [ "$attempt" -lt 100 ]; do
+        sleep 0.02
+        attempt=$((attempt + 1))
+      done
+    fi
     cat "$EMBLEM_ARCHIVE"
     ;;
   *" up -d --no-deps --wait "*)
-    service="${'${'}@: -1}"
+    service=\${*##* }
     if ! grep -Fxq "$service" "$SERVICE_STATE"; then printf '%s\\n' "$service" >> "$SERVICE_STATE"; fi
+    if ! awk -F '|' -v service="$service" '$2 == service && $3 != "true" { found=1 } END { exit !found }' "$CONTAINER_STATE"; then
+      printf '%s|%s|false\\n' "$service-container" "$service" >> "$CONTAINER_STATE"
+    fi
     ;;
   *) printf 'unexpected docker invocation: %s\\n' "$*" >&2; exit 90 ;;
 esac
@@ -59,30 +101,34 @@ esac
   const dockerPath = path.join(bin, 'docker');
   writeFileSync(dockerPath, dockerStub);
   chmodSync(dockerPath, 0o755);
+  if (!isWindows) {
+    const timeoutPath = path.join(bin, 'timeout');
+    writeFileSync(timeoutPath, '#!/bin/sh\nset -eu\n[ "$1" = --foreground ] && shift\ncase "$1" in --kill-after=*) shift ;; esac\nshift\nexec "$@"\n');
+    chmodSync(timeoutPath, 0o755);
+  }
 
   return {
-    root,
     output,
+    containerState,
     log: path.join(root, 'docker.log'),
     env: {
       ...process.env,
-      BACKUP_DIR: bashPath(output),
+      BACKUP_DIR: shellPath(output),
       BACKUP_TIMEOUT_SECONDS: '30',
-      DOCKER_LOG: bashPath(path.join(root, 'docker.log')),
-      EMBLEM_ARCHIVE: bashPath(archive),
-      PATH: `${bashPath(bin)}:/usr/bin:/bin`,
-      RUNNING_SERVICES: runningServices,
-      SERVICE_STATE: bashPath(serviceState),
+      CONTAINER_STATE: shellPath(containerState),
+      DOCKER_LOG: shellPath(path.join(root, 'docker.log')),
+      EMBLEM_ARCHIVE: shellPath(archive),
+      EVENT_OBSERVED_FILE: shellPath(path.join(root, 'event-observed')),
+      EVENT_STOP_FILE: shellPath(path.join(root, 'event-stop')),
+      EVENT_TRIGGER_FILE: shellPath(path.join(root, 'event-trigger')),
+      PATH: `${shellPath(bin)}:/usr/bin:/bin`,
+      SERVICE_STATE: shellPath(serviceState),
     },
   };
 }
 
 function runBackup(harness: ReturnType<typeof makeHarness>, overrides: Record<string, string> = {}) {
-  return spawnSync(bash, ['-lc', './scripts/backup.sh'], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    env: { ...harness.env, ...overrides },
-  });
+  return runShell(['-c', 'sh scripts/backup.sh'], { ...harness.env, ...overrides });
 }
 
 afterEach(() => {
@@ -93,7 +139,7 @@ afterEach(() => {
 
 describe('backup.sh maintenance snapshot', () => {
   test('stops writers, uses the read-only volume helper, atomically publishes a complete set and restores prior services', () => {
-    const harness = makeHarness('db app proxy');
+    const harness = makeHarness('db app cleanup proxy');
 
     const result = runBackup(harness);
 
@@ -108,17 +154,19 @@ describe('backup.sh maintenance snapshot', () => {
     const calls = readFileSync(harness.log, 'utf8').trim().split(/\r?\n/);
     const proxyStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' proxy'));
     const appStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' app'));
+    const cleanupStop = calls.findIndex((line) => line.includes('stop') && line.endsWith(' cleanup'));
     const databaseDump = calls.findIndex((line) => line.includes('exec -T db'));
     const emblemDump = calls.findIndex((line) => line.includes('emblem-backup'));
     const appRestore = calls.findIndex((line) => line.includes('up -d --no-deps --wait --wait-timeout') && line.endsWith(' app'));
     const proxyRestore = calls.findIndex((line) => line.includes('up -d --no-deps --wait --wait-timeout') && line.endsWith(' proxy'));
     expect(proxyStop).toBeGreaterThanOrEqual(0);
     expect(appStop).toBeGreaterThan(proxyStop);
-    expect(databaseDump).toBeGreaterThan(appStop);
+    expect(cleanupStop).toBeGreaterThan(appStop);
+    expect(databaseDump).toBeGreaterThan(cleanupStop);
     expect(emblemDump).toBeGreaterThan(databaseDump);
     expect(appRestore).toBeGreaterThan(emblemDump);
     expect(proxyRestore).toBeGreaterThan(appRestore);
-    expect(calls.some((line) => line.endsWith(' cleanup'))).toBe(false);
+    expect(calls.some((line) => line.startsWith('events --since '))).toBe(true);
   });
 
   test('removes the incomplete staging set and restores prior services when volume backup fails', () => {
@@ -142,8 +190,32 @@ describe('backup.sh maintenance snapshot', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('database service must be running');
     expect(readdirSync(harness.output)).toEqual([]);
-    expect(readFileSync(harness.log, 'utf8').trim().split(/\r?\n/)).toEqual([
-      'compose ps --status running --services',
-    ]);
+  });
+
+  test('rejects a running one-off writer without stopping or removing that container', () => {
+    const harness = makeHarness('db app cleanup proxy', 'cleanup-oneoff-1|cleanup|true');
+
+    const result = runBackup(harness);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('one-off cleanup container');
+    expect(readdirSync(harness.output)).toEqual([]);
+    expect(readFileSync(harness.log, 'utf8')).not.toContain(' stop ');
+    expect(readFileSync(harness.containerState, 'utf8')).toContain('cleanup-oneoff-1|cleanup|true');
+  });
+
+  test('invalidates a snapshot if a project writer starts during volume export', () => {
+    const harness = makeHarness();
+
+    const result = runBackup(harness, { DOCKER_START_WRITER: 'true' });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('writer container started during snapshot');
+    expect(readdirSync(harness.output)).toEqual([]);
+    expect(readFileSync(harness.containerState, 'utf8')).toContain('cleanup-oneoff|cleanup|true');
+    const calls = readFileSync(harness.log, 'utf8');
+    expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 app');
+    expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 cleanup');
+    expect(calls).toContain('up -d --no-deps --wait --wait-timeout 120 proxy');
   });
 });

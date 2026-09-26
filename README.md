@@ -88,15 +88,32 @@ docker compose --env-file .env exec -T app sh -ec 'df -h "$EMBLEM_DIR"'
 
 ## 一致性备份
 
-在部署目录执行 `scripts/backup.sh`。Docker Compose 必须能访问目标 project 且 db 正在运行。脚本为备份目录加互斥锁；记录 app/cleanup/proxy 原运行状态，先停 proxy 阻断新请求，再用有界优雅停止排空并停止 app 和 cleanup。只有确认两个写入服务均已停止后才开始 `pg_dump`。整个数据库与班徽快照期间 writer 保持停止；班徽由 maintenance profile 下的 `emblem-backup` helper 读取，它使用 PostgreSQL 17 Alpine 镜像且只读挂载 `emblem-data`，不会启动 app。
+在部署目录执行 `scripts/backup.sh`。Docker Compose 必须能访问目标 project 且 db 正在运行。脚本为备份目录加互斥锁；记录 app/cleanup/proxy 原运行状态，并按 Docker Compose project/service labels 检查正在运行的 writer 容器（包括 `compose run` 创建的 one-off）。发现 one-off 或无法归类的 app/cleanup 容器时会拒绝备份，不会停止或删除未知容器。通过检查后先停 proxy 阻断新请求，再有界优雅停止 app 和 cleanup，并确认 project 内没有残留 writer 容器。快照期间脚本监听该 project 的 app/cleanup Docker `start` 事件；检测到启动、事件监视器退出或报告错误时，本次 staging 会被丢弃。
 
-数据库导出、班徽 tar 校验及 SHA-256 manifest 全部成功后，脚本将同一暂存目录原子改名为完整备份目录。任一步失败会删除暂存目录，不发布半套备份；退出 trap 按原状态和顺序恢复 app、cleanup、proxy。停止等待默认 60 秒，单项备份默认限时 1800 秒，服务恢复默认等待 120 秒，可用 `STOP_TIMEOUT_SECONDS`（1..300）、`BACKUP_TIMEOUT_SECONDS`（1..86400）、`RESTORE_WAIT_SECONDS`（1..3600）调整。
+备份锁只串行化 `backup.sh`，不能锁住 Docker Compose 生命周期操作。操作员必须在整个备份窗口独占维护该 project：从脚本开始到完成，不要在其他终端、自动化任务或面板中对 app/cleanup 执行 `up`、`start` 或 `run`。事件监视用于发现意外启动并使备份失败，不能替代该维护约定。班徽由 maintenance profile 下的 `emblem-backup` helper 读取；它使用 PostgreSQL 17 Alpine 镜像且只读挂载 `emblem-data`，不会启动 app。
+
+数据库导出、班徽 tar 校验、writer 事件检查及 SHA-256 manifest 全部成功后，脚本将同一暂存目录原子改名为完整备份目录。任一步失败会删除暂存目录，不发布半套备份；退出 trap 按原状态和顺序恢复 app、cleanup、proxy。停止等待默认 60 秒，单项备份默认限时 1800 秒，服务恢复默认等待 120 秒，可用 `STOP_TIMEOUT_SECONDS`（1..300）、`BACKUP_TIMEOUT_SECONDS`（1..86400）、`RESTORE_WAIT_SECONDS`（1..3600）调整。
 
 ```sh
 BACKUP_DIR=/srv/student-lottery/backups sh scripts/backup.sh
 ```
 
 成功输出目录内有 `postgres.sql`、`emblems.tar.gz`、`manifest.sha256`。将完整目录复制到独立主机或对象存储，并定期核验哈希和执行恢复演练。不要在维护备份期间手工启动 app 或 cleanup。
+
+若主机断电或脚本被强制终止，可能留下 `.student-lottery-backup.lock` 和 `.partial.*` 暂存目录。恢复前先检查正在使用的全部 shell/自动化执行环境和目标 project，确认没有任何 `backup.sh` 进程存活，例如：
+
+```sh
+ps -eo pid=,args= | grep '[s]cripts/backup.sh' || true
+```
+
+只有确认进程不存在后，才可对实际备份目录移除空锁目录；`rmdir` 会拒绝删除非空目录：
+
+```sh
+BACKUP_DIR=/srv/student-lottery/backups
+rmdir "$BACKUP_DIR/.student-lottery-backup.lock"
+```
+
+先检查遗留 `.partial.*` 内容和容器状态，不要将 partial 目录当成完整备份，也不要在进程仍运行时移除锁或暂存文件。确认目标 project 的 app/cleanup 状态后，再单独决定是否恢复服务。
 
 ## 隔离恢复演练
 
