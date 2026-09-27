@@ -25,13 +25,35 @@ docker compose -f compose.test.yml stop postgres
 
 ## E2E 浏览器测试
 
-先在当前 shell 或本机密钥管理器中设置 `E2E_DATABASE_URL`，使用专用 PostgreSQL 17 E2E 数据库的连接凭据。运行入口只接受 `localhost` 或 `127.0.0.1` 上的 `55433/lottery_e2e`，会拒绝其他主机、端口、数据库及连接参数；不要把 DSN 或密码写入仓库。
+首次配置专用 PostgreSQL 17 E2E 数据库时，由数据库管理员在目标库执行以下初始化。先连接 `lottery_e2e` 并完成项目迁移；然后设置固定数据库 comment，并创建不拥有应用表、无高权限的 runner 角色。用 `\password` 在交互提示中设置角色密码，不要把密码写进 SQL 文件或 shell 历史：
+
+```sql
+COMMENT ON DATABASE lottery_e2e IS 'student-lottery-e2e:v1';
+CREATE ROLE lottery_e2e_runner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE lottery_e2e TO lottery_e2e_runner;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC, lottery_e2e_runner;
+GRANT USAGE ON SCHEMA public TO lottery_e2e_runner;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO lottery_e2e_runner;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO lottery_e2e_runner;
+```
+
+密码设置命令需在同一 `psql` 会话中运行：
+
+```text
+\password lottery_e2e_runner
+```
+
+在当前 shell 或本机密钥管理器中设置 `E2E_DATABASE_URL`，使用上述 runner 角色凭据。入口只接受 `localhost` 或 `127.0.0.1` 上的 `55433/lottery_e2e`，并在启动 Next 前验证数据库 comment、数据库/表 owner 与角色关系、角色属性和所需 DML 权限；runner 不可拥有 schema CREATE、表 TRUNCATE 或 TRIGGER 权限。不要把 DSN 或密码写入仓库。中奖记录受不可变 trigger 保护；fixture teardown 会保留含中奖记录的整类 fixture 数据，不会关闭 trigger。需要干净数据时，重建专用 disposable E2E 数据库。
+
+安装依赖并安装 Playwright Chromium 浏览器二进制：
 
 ```sh
+npm ci
+npx playwright install chromium
 npm run test:e2e
 ```
 
-脚本会自行启动 Next.js 和 Chromium 测试。应用 secret、管理员/老师 fixture 密码均在本次运行中随机生成，不需要写入 `.env` 或文档。缺少 `E2E_DATABASE_URL` 时会在启动服务器前给出明确错误。
+脚本会自行启动 Next.js 和 Chromium 测试。应用 secret、管理员/老师 fixture 密码均在本次运行中随机生成，不需要写入 `.env` 或文档。缺少 `E2E_DATABASE_URL`、数据库身份不匹配或未安装 Chromium 时，会在启动应用服务器前给出明确错误；缺浏览器时提示执行 `npx playwright install chromium`。
 
 本地首次创建管理员（在项目根目录运行；邮箱可公开，密码不会回显或进入 shell 历史）：
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { test as base, expect, type Page } from '@playwright/test';
 import { auth } from '../../src/lib/auth';
 import { user } from '../../src/db/auth-schema';
@@ -156,14 +156,12 @@ async function waitForDatabaseRequestsToSettle() {
 
 export async function removeTeacherSession(session: TeacherSession) {
   await db.transaction(async (tx) => {
+    const [existingWin] = await tx.select({ id: winningRecords.id }).from(winningRecords)
+      .where(eq(winningRecords.classId, session.classId)).limit(1);
+    if (existingWin) return;
+
     await tx.delete(redemptionAudit).where(eq(redemptionAudit.classId, session.classId));
     await tx.delete(stockEvents).where(eq(stockEvents.classId, session.classId));
-    await tx.execute(sql.raw('ALTER TABLE winning_records DISABLE TRIGGER protect_winning_record_trigger'));
-    try {
-      await tx.delete(winningRecords).where(eq(winningRecords.classId, session.classId));
-    } finally {
-      await tx.execute(sql.raw('ALTER TABLE winning_records ENABLE TRIGGER protect_winning_record_trigger'));
-    }
     const classSessions = await tx.select({ id: lotterySessions.id }).from(lotterySessions)
       .where(eq(lotterySessions.classId, session.classId));
     for (const row of classSessions) {
@@ -192,11 +190,12 @@ async function seedAdminSession(): Promise<AdminSession> {
 async function removeAdminSession(session: AdminSession) {
   await db.transaction(async (tx) => {
     for (const classId of session.classIds) {
+      const [existingWin] = await tx.select({ id: winningRecords.id }).from(winningRecords)
+        .where(eq(winningRecords.classId, classId)).limit(1);
+      if (existingWin) continue;
+
       await tx.delete(redemptionAudit).where(eq(redemptionAudit.classId, classId));
       await tx.delete(stockEvents).where(eq(stockEvents.classId, classId));
-      await tx.execute(sql.raw('ALTER TABLE winning_records DISABLE TRIGGER protect_winning_record_trigger'));
-      try { await tx.delete(winningRecords).where(eq(winningRecords.classId, classId)); }
-      finally { await tx.execute(sql.raw('ALTER TABLE winning_records ENABLE TRIGGER protect_winning_record_trigger')); }
       const sessionIds = await tx.select({ id: lotterySessions.id }).from(lotterySessions).where(eq(lotterySessions.classId, classId));
       for (const row of sessionIds) {
         await tx.delete(lotteryRounds).where(eq(lotteryRounds.sessionId, row.id));

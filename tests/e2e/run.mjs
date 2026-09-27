@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import next from 'next';
-import { createRuntimeSecret, validateE2EDatabaseUrl } from '../e2e-support/runtime-env.mjs';
+import { chromium } from '@playwright/test';
+import { assertChromiumInstalled, createRuntimeSecret, verifyE2EDatabaseIdentity } from '../e2e-support/runtime-env.mjs';
 
 const hostname = '127.0.0.1';
 const port = 3215;
 const baseURL = `http://${hostname}:${port}`;
-process.env.DATABASE_URL = validateE2EDatabaseUrl();
+process.env.DATABASE_URL = await verifyE2EDatabaseIdentity();
+assertChromiumInstalled(chromium.executablePath());
 process.env.BETTER_AUTH_SECRET = createRuntimeSecret();
 process.env.BETTER_AUTH_URL = baseURL;
 process.env.EMBLEM_DIR = resolve('test-results/e2e-emblems');

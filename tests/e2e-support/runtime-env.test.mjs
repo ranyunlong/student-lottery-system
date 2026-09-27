@@ -37,6 +37,72 @@ test('E2E runtime requires the dedicated database and creates ephemeral secrets'
   assert.equal(new Set(passwords).size, passwords.length);
 });
 
+test('E2E runtime accepts only a marked database and a non-owner restricted role', async () => {
+  const { validateE2EDatabaseIdentity } = await import(pathToFileURL(runtimeModule));
+  const validIdentity = {
+    database: 'lottery_e2e',
+    marker: 'student-lottery-e2e:v1',
+    user: 'lottery_e2e_runner',
+    tableOwner: 'lottery_e2e_owner',
+    databaseOwner: 'lottery_e2e_owner',
+    hasTableOwnerRole: false,
+    hasDatabaseOwnerRole: false,
+    superuser: false,
+    createDatabase: false,
+    createRole: false,
+    replication: false,
+    bypassRls: false,
+    canUseSchema: true,
+    canCreateInSchema: false,
+    canWriteWinningRecords: true,
+    canTruncateWinningRecords: false,
+    canManageWinningRecordTriggers: false,
+  };
+
+  assert.equal(validateE2EDatabaseIdentity(validIdentity), true);
+  for (const invalidIdentity of [
+    { ...validIdentity, marker: null },
+    { ...validIdentity, database: 'postgres' },
+    { ...validIdentity, superuser: true },
+    { ...validIdentity, createDatabase: true },
+    { ...validIdentity, createRole: true },
+    { ...validIdentity, replication: true },
+    { ...validIdentity, bypassRls: true },
+    { ...validIdentity, tableOwner: validIdentity.user },
+    { ...validIdentity, databaseOwner: validIdentity.user },
+    { ...validIdentity, hasTableOwnerRole: true },
+    { ...validIdentity, hasDatabaseOwnerRole: true },
+    { ...validIdentity, canUseSchema: false },
+    { ...validIdentity, canCreateInSchema: true },
+    { ...validIdentity, canWriteWinningRecords: false },
+    { ...validIdentity, canTruncateWinningRecords: true },
+    { ...validIdentity, canManageWinningRecordTriggers: true },
+  ]) {
+    assert.throws(() => validateE2EDatabaseIdentity(invalidIdentity));
+  }
+});
+
+test('E2E runner reports the Chromium installation command before starting the app', async () => {
+  const { assertChromiumInstalled } = await import(pathToFileURL(runtimeModule));
+  const runner = await readFile(resolve(projectRoot, 'tests/e2e/run.mjs'), 'utf8');
+  const readme = await readFile(resolve(projectRoot, 'README.md'), 'utf8');
+
+  assert.equal(assertChromiumInstalled('chromium.exe', () => true), true);
+  assert.throws(
+    () => assertChromiumInstalled('missing-chromium.exe', () => false),
+    /npx playwright install chromium/,
+  );
+  assert.match(runner, /assertChromiumInstalled\(chromium\.executablePath\(\)\)/);
+  assert.ok(runner.indexOf('assertChromiumInstalled') < runner.indexOf('await app.prepare()'));
+  assert.match(readme, /npx playwright install chromium/);
+});
+
+test('fixture cleanup never disables the winning-record protection trigger', async () => {
+  const fixtures = await readFile(resolve(projectRoot, 'tests/e2e/fixtures.ts'), 'utf8');
+  assert.doesNotMatch(fixtures, /ALTER\s+TABLE\s+winning_records\s+DISABLE\s+TRIGGER/i);
+  assert.doesNotMatch(fixtures, /ALTER\s+TABLE\s+winning_records\s+ENABLE\s+TRIGGER/i);
+});
+
 test('E2E entrypoint and sources do not embed database or account credentials', async () => {
   const packageJson = JSON.parse(await readFile(resolve(projectRoot, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['test:e2e'], 'node tests/e2e/run.mjs');

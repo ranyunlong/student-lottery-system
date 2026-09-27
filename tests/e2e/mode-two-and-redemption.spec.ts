@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { test, expect, captureResponsiveEvidence, loginAsAdmin, loginAsTeacher } from './fixtures';
-import { db } from '../../src/db/client';
+import { db, pool } from '../../src/db/client';
 import { prizes, redemptionAudit, stockEvents, winningRecords } from '../../src/db/schema';
 
 test('模式二连续抽取并可兑换、纠正已持久化中奖记录', async ({ page, teacherSession, adminSession }) => {
@@ -120,6 +120,24 @@ test('库存耗尽后不能开始下一轮', async ({ page, teacherSession }) =>
   await expect(page.getByRole('button', { name: '下一轮' })).not.toBeVisible();
   expect((await db.select().from(prizes).where(eq(prizes.id, teacherSession.prizeId)))[0].stock).toBe(0);
   expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId))).toHaveLength(1);
+});
+
+test('受限 runner 保持中奖记录 trigger 启用且不可删除历史结果', async ({ page, teacherSession }) => {
+  await loginAsTeacher(page, teacherSession);
+  await page.goto(`/classes/${teacherSession.classId}/lotteries/${teacherSession.sessionId}`);
+  await page.getByRole('button', { name: '开始抽奖' }).click();
+  await page.getByRole('button', { name: '停止' }).click();
+  await expect(page.getByText('中奖结果已由服务端确认并保存。')).toBeVisible();
+
+  const trigger = await pool.query<{ tgenabled: string }>(`
+    select tgenabled from pg_trigger
+    where tgrelid = 'public.winning_records'::regclass
+      and tgname = 'protect_winning_record_trigger'
+  `);
+  expect(trigger.rows).toEqual([{ tgenabled: 'O' }]);
+  const [win] = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId));
+  await expect(pool.query('delete from winning_records where id = $1', [win.id]))
+    .rejects.toThrow(/winning records cannot be deleted/i);
 });
 
 test('同一学生在新的真实场次重新具备候选资格', async ({ page, teacherSession }) => {

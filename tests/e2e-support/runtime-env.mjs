@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import pg from 'pg';
 
 const allowedHosts = new Set(['127.0.0.1', 'localhost']);
+const databaseMarker = 'student-lottery-e2e:v1';
 
 export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -28,6 +31,85 @@ export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL) {
   }
 
   return value;
+}
+
+export function validateE2EDatabaseIdentity(identity) {
+  if (
+    identity?.database !== 'lottery_e2e'
+    || identity.marker !== databaseMarker
+    || !identity.user
+    || identity.user === identity.tableOwner
+    || identity.user === identity.databaseOwner
+    || identity.hasTableOwnerRole
+    || identity.hasDatabaseOwnerRole
+    || identity.superuser
+    || identity.createDatabase
+    || identity.createRole
+    || identity.replication
+    || identity.bypassRls
+    || !identity.canUseSchema
+    || identity.canCreateInSchema
+    || !identity.canWriteWinningRecords
+    || identity.canTruncateWinningRecords
+    || identity.canManageWinningRecordTriggers
+  ) {
+    throw new Error('Refusing E2E database: expected the marked lottery_e2e database and a non-owner, non-privileged runner role with fixture DML access.');
+  }
+
+  return true;
+}
+
+export async function verifyE2EDatabaseIdentity(value = process.env.E2E_DATABASE_URL) {
+  const connectionString = validateE2EDatabaseUrl(value);
+  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 5000 });
+
+  try {
+    await client.connect();
+    const { rows } = await client.query(`
+      select current_database() as database,
+        current_user as "user",
+        (select shobj_description(oid, 'pg_database')
+          from pg_database where datname = current_database()) as marker,
+        pg_get_userbyid(database.datdba) as "databaseOwner",
+        role.rolsuper as "superuser",
+        role.rolcreatedb as "createDatabase",
+        role.rolcreaterole as "createRole",
+        role.rolreplication as replication,
+        role.rolbypassrls as "bypassRls",
+        pg_get_userbyid(relation.relowner) as "tableOwner",
+        pg_has_role(current_user, relation.relowner, 'MEMBER') as "hasTableOwnerRole",
+        pg_has_role(current_user, database.datdba, 'MEMBER') as "hasDatabaseOwnerRole",
+        has_schema_privilege(current_user, 'public', 'USAGE') as "canUseSchema",
+        has_schema_privilege(current_user, 'public', 'CREATE') as "canCreateInSchema",
+        has_table_privilege(current_user, 'public.winning_records', 'SELECT,INSERT,UPDATE,DELETE') as "canWriteWinningRecords",
+        has_table_privilege(current_user, 'public.winning_records', 'TRUNCATE') as "canTruncateWinningRecords",
+        has_table_privilege(current_user, 'public.winning_records', 'TRIGGER') as "canManageWinningRecordTriggers"
+      from pg_roles as role
+      join pg_database as database on database.datname = current_database()
+      join pg_class as relation on relation.oid = to_regclass('public.winning_records')
+      where role.rolname = current_user
+    `);
+
+    if (rows.length !== 1) {
+      throw new Error('required E2E schema is missing');
+    }
+    validateE2EDatabaseIdentity(rows[0]);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Refusing E2E database:')) throw error;
+    throw new Error('Could not verify the marked E2E database and restricted runner role. Confirm the database marker, schema, and grants.');
+  } finally {
+    await client.end().catch(() => {});
+  }
+
+  return connectionString;
+}
+
+export function assertChromiumInstalled(executablePath, exists = existsSync) {
+  if (!exists(executablePath)) {
+    throw new Error('Playwright Chromium is not installed. Run `npx playwright install chromium` before `npm run test:e2e`.');
+  }
+
+  return true;
 }
 
 export function createRuntimeSecret() {
