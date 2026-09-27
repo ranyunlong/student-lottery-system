@@ -28,8 +28,12 @@ function selectedStudent(data: FormData): number | undefined {
 }
 
 async function refreshRound(token: string) {
-  const [row] = await db.select({ classId: lotteryRounds.classId }).from(lotteryRounds).where(eq(lotteryRounds.startToken, token));
-  if (row) revalidatePath('/classes/' + row.classId + '/lotteries');
+  const [row] = await db.select({ classId: lotteryRounds.classId, sessionId: lotteryRounds.sessionId })
+    .from(lotteryRounds).where(eq(lotteryRounds.startToken, token));
+  if (row) {
+    revalidatePath('/classes/' + row.classId + '/lotteries');
+    revalidatePath('/classes/' + row.classId + '/lotteries/' + row.sessionId);
+  }
 }
 
 function message(error: unknown) {

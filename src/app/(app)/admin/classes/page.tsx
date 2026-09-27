@@ -20,13 +20,13 @@ export default async function ClassesPage() {
     if (row.teacherId) grouped.get(row.id)!.members.push({ id: row.teacherId, name: row.teacherName ?? '未知老师' });
   }
   const activeTeachers = teachers.filter((teacher) => !teacher.banned);
-  const input = 'min-h-10 rounded border border-slate-300 bg-white px-3 py-2 text-sm focus:border-teal-700 focus:outline-none';
+  const input = 'min-h-10 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-sm focus:border-teal-700 focus:outline-none';
   return <section className="space-y-7">
     <div className="border-b border-slate-200 pb-4"><h1 className="text-2xl font-semibold">班级管理</h1></div>
     <section className="space-y-4 border-b border-slate-200 pb-7">
       <h2 className="text-lg font-semibold">创建班级</h2>
       <ActionForm action={createClassAction} label="创建班级">
-        <label className="flex flex-col gap-1 text-sm font-medium">班级名称<input className={input} name="name" required /></label>
+      <label className="flex min-w-0 flex-1 flex-col gap-1 text-sm font-medium">班级名称<input className={input} name="name" required /></label>
       </ActionForm>
     </section>
     <section className="space-y-4">
@@ -42,14 +42,14 @@ export default async function ClassesPage() {
               className="h-16 w-16 rounded border border-slate-200 object-contain" />}
             {!item.archived && <ActionForm action={uploadEmblemAction} label="更新班徽">
               <input type="hidden" name="classId" value={id} />
-              <label className="flex flex-col gap-1 text-sm font-medium">上传班徽
+              <label className="flex min-w-0 flex-1 flex-col gap-1 text-sm font-medium">上传班徽
                 <input className={input} type="file" name="file" accept="image/png,image/jpeg,image/webp" required />
               </label>
             </ActionForm>}
           </div>
           {!item.archived && <ActionForm action={updateClassAction} label="保存名称">
             <input type="hidden" name="classId" value={id} />
-            <label className="flex flex-col gap-1 text-sm font-medium">班级名称
+            <label className="flex min-w-0 flex-1 flex-col gap-1 text-sm font-medium">班级名称
               <input className={input} name="name" defaultValue={item.name} required />
             </label>
           </ActionForm>}
@@ -67,7 +67,7 @@ export default async function ClassesPage() {
           {!item.archived && <div className="flex flex-wrap items-end gap-5">
             <ActionForm action={assignTeacherAction} label="分配老师">
               <input type="hidden" name="classId" value={id} />
-              <label className="flex flex-col gap-1 text-sm font-medium">选择老师
+              <label className="flex min-w-0 flex-1 flex-col gap-1 text-sm font-medium">选择老师
                 <select name="teacherId" required defaultValue="" className={input}>
                   <option value="" disabled>请选择</option>
                   {activeTeachers.filter((teacher) => !item.members.some((member) => member.id === teacher.id))

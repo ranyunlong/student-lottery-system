@@ -17,6 +17,22 @@ function errorResponse(error: unknown): Response {
   throw error;
 }
 
+function hasSameOrigin(request: Request): boolean {
+  const origin = request.headers.get('origin');
+  if (!origin) return false;
+  try {
+    const parsedOrigin = new URL(origin);
+    const expected = new URL(request.url);
+    const host = request.headers.get('host');
+    if (host) expected.host = host;
+    const forwardedProtocol = request.headers.get('x-forwarded-proto')?.split(',')[0].trim();
+    if (forwardedProtocol === 'http' || forwardedProtocol === 'https') expected.protocol = `${forwardedProtocol}:`;
+    return origin === parsedOrigin.origin && parsedOrigin.origin === expected.origin;
+  } catch {
+    return false;
+  }
+}
+
 async function readForm(request: Request): Promise<FormData> {
   const type = request.headers.get('content-type');
   if (!type?.toLowerCase().startsWith('multipart/form-data;')) throw new UploadError('表单格式无效');
@@ -49,8 +65,7 @@ export async function POST(request: Request, context: Context): Promise<Response
     const { classId } = await context.params;
     if (!classIdPattern.test(classId)) throw new UploadError('班级编号无效');
     await requireClassAccess(classId);
-    const origin = request.headers.get('origin');
-    if (origin !== new URL(request.url).origin) throw new ForbiddenError();
+    if (!hasSameOrigin(request)) throw new ForbiddenError();
     const form = await readForm(request);
     const intent = form.get('intent');
     if (intent !== 'preview' && intent !== 'confirm') throw new UploadError('导入操作无效');

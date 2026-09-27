@@ -4,12 +4,13 @@ import { useState, useTransition, type FormEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import type { ActionResult } from '../features/classes/actions';
 
-export function ActionForm({ action, label, children, confirm, requestId }: {
+export function ActionForm({ action, label, children, confirm, requestId, successHref }: {
   action: (data: FormData) => Promise<ActionResult>;
   label: string;
   children: ReactNode;
   confirm?: string;
   requestId?: string;
+  successHref?: string;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -45,7 +46,8 @@ export function ActionForm({ action, label, children, confirm, requestId }: {
         if (response.ok) {
           renewRequestId(form);
           form.reset();
-          router.refresh();
+          if (successHref) router.push(successHref);
+          else router.refresh();
         }
       } catch {
         setResult({ ok: false, message: '操作失败，请重试' });

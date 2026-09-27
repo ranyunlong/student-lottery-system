@@ -1,6 +1,8 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+const { routerRefresh } = vi.hoisted(() => ({ routerRefresh: vi.fn() }));
+vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: routerRefresh }) }));
 vi.mock('./rounds.actions', () => ({ startRoundAction: vi.fn(), stopRoundAction: vi.fn(), cancelRoundAction: vi.fn() }));
 import { DrawStage, type DrawStageActions, type DrawStageSession } from './draw-stage';
 
@@ -23,7 +25,7 @@ function actions(overrides: Partial<DrawStageActions> = {}): DrawStageActions {
   };
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => { localStorage.clear(); routerRefresh.mockClear(); });
 afterEach(cleanup);
 
 test('选择学生后开始本地动画，停止后只显示服务端中奖结果', async () => {
@@ -126,4 +128,43 @@ test('归档候选不能开始且不计入可用学生', () => {
   expect(screen.getByRole('option', { name: /已归档学生/ })).toBeDisabled();
   expect(screen.getByText((_, element) => Boolean(element?.tagName === 'P' && element.textContent?.includes('可用学生') && element.textContent.includes('0')))).toBeVisible();
   expect(screen.getByRole('button', { name: '开始抽奖' })).toBeDisabled();
+});
+
+test('持久化结果刷新候选后，下一轮切换到新的首位可用学生', async () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const user = userEvent.setup();
+  const api = actions();
+  const firstSession = { ...session, candidates: [
+    { id: 1, name: '甲同学', remaining: 1 }, { id: 2, name: '乙同学', remaining: 1 },
+  ] };
+  const { rerender } = render(<DrawStage session={firstSession} actions={api} />);
+  await user.selectOptions(screen.getByLabelText('本轮学生'), '1');
+  await user.click(screen.getByRole('button', { name: '开始抽奖' }));
+  await user.click(screen.getByRole('button', { name: '停止' }));
+  rerender(<DrawStage session={{ ...firstSession, candidates: [
+    { id: 1, name: '甲同学', remaining: 0 }, { id: 2, name: '乙同学', remaining: 1 },
+  ], drawsRemaining: 1 }} actions={api} />);
+  expect(screen.getByLabelText('本轮学生')).toHaveValue('2');
+  await user.click(screen.getByRole('button', { name: '下一轮' }));
+  await user.click(screen.getByRole('button', { name: '开始抽奖' }));
+  expect(api.start).toHaveBeenLastCalledWith(2);
+  vi.unstubAllGlobals();
+});
+
+test('committed rounds refresh counts and offer another round only while draws remain', async () => {
+  const user = userEvent.setup();
+  const api = actions({ start: vi.fn(async () => ({ token: 'round-2' })) });
+  const initial = { ...session, mode: 'prize-student' as const, drawsRemaining: 2,
+    prizes: [{ ...session.prizes[0], stock: 2, quotaRemaining: 2 }] };
+  const view = render(<DrawStage session={initial} actions={api} />);
+
+  await user.click(screen.getByRole('button', { name: '开始抽奖' }));
+  await user.click(screen.getByRole('button', { name: '停止' }));
+  expect(await screen.findByRole('button', { name: '下一轮' })).toBeVisible();
+  expect(routerRefresh).toHaveBeenCalled();
+
+  await user.click(screen.getByRole('button', { name: '下一轮' }));
+  expect(screen.getByRole('button', { name: '开始抽奖' })).toBeVisible();
+  view.rerender(<DrawStage session={{ ...initial, drawsRemaining: 0 }} actions={api} />);
+  expect(screen.queryByRole('button', { name: '下一轮' })).not.toBeInTheDocument();
 });

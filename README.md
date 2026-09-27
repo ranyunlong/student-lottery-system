@@ -23,6 +23,16 @@ Next.js 默认在 `http://localhost:3000` 提供本地应用。停止本地测�
 docker compose -f compose.test.yml stop postgres
 ```
 
+## E2E 浏览器测试
+
+先在当前 shell 或本机密钥管理器中设置 `E2E_DATABASE_URL`，使用专用 PostgreSQL 17 E2E 数据库的连接凭据。运行入口只接受 `localhost` 或 `127.0.0.1` 上的 `55433/lottery_e2e`，会拒绝其他主机、端口、数据库及连接参数；不要把 DSN 或密码写入仓库。
+
+```sh
+npm run test:e2e
+```
+
+脚本会自行启动 Next.js 和 Chromium 测试。应用 secret、管理员/老师 fixture 密码均在本次运行中随机生成，不需要写入 `.env` 或文档。缺少 `E2E_DATABASE_URL` 时会在启动服务器前给出明确错误。
+
 本地首次创建管理员（在项目根目录运行；邮箱可公开，密码不会回显或进入 shell 历史）：
 
 ```sh

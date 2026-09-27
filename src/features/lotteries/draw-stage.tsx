@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { DrawResult } from './types';
 import { cancelRoundAction, startRoundAction, stopRoundAction } from './rounds.actions';
 
@@ -25,6 +26,7 @@ const pendingKey = (sessionId?: string) => 'student-lottery:pending-round:' + (s
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重试';
 
 export function DrawStage({ session, actions }: Props) {
+  const router = useRouter();
   const availableCandidates = useMemo(() => session.candidates.filter((item) => item.remaining > 0 && !item.archived), [session.candidates]);
   const fixedPrize = session.prizes[0];
   const unavailableStudents = availableCandidates.length === 0 || session.drawsRemaining <= 0;
@@ -36,6 +38,9 @@ export function DrawStage({ session, actions }: Props) {
   const [error, setError] = useState('');
   const [result, setResult] = useState<DrawResult | null>(null);
   const [ticker, setTicker] = useState(session.candidates[0]?.name ?? '等待开始');
+  const selectedCandidateAvailable = availableCandidates.some((item) => String(item.id) === selectedStudent);
+  const effectiveSelectedStudent = selectedStudent && !selectedCandidateAvailable
+    ? String(availableCandidates[0]?.id ?? '') : selectedStudent;
 
   useEffect(() => {
     if (!running || session.candidates.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -47,10 +52,10 @@ export function DrawStage({ session, actions }: Props) {
   }, [running, session.candidates]);
 
   async function start() {
-    if (busy || running || session.drawsRemaining <= 0 || outOfStock || (session.mode === 'student-prize' && !selectedStudent)) return;
+    if (busy || running || session.drawsRemaining <= 0 || outOfStock || (session.mode === 'student-prize' && !effectiveSelectedStudent)) return;
     setBusy(true); setError('');
     try {
-      const started = await actions.start(session.mode === 'student-prize' ? Number(selectedStudent) : undefined);
+      const started = await actions.start(session.mode === 'student-prize' ? Number(effectiveSelectedStudent) : undefined);
       setToken(started.token); setRunning(true); localStorage.setItem(pendingKey(session.sessionId), started.token);
     } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
   }
@@ -61,6 +66,7 @@ export function DrawStage({ session, actions }: Props) {
     try {
       const committed = await actions.stop(token);
       setResult(committed); setRunning(false); setToken(''); localStorage.removeItem(pendingKey(session.sessionId));
+      router.refresh();
     } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
   }
 
@@ -74,7 +80,7 @@ export function DrawStage({ session, actions }: Props) {
   }
 
   const canStart = !busy && !running && session.drawsRemaining > 0 && !outOfStock
-    && (session.mode === 'prize-student' || Boolean(selectedStudent));
+    && (session.mode === 'prize-student' || availableCandidates.some((item) => String(item.id) === effectiveSelectedStudent));
   const stageClass = running ? 'motion-safe:animate-pulse' : '';
 
   return <section aria-labelledby="draw-stage-title" className="min-w-0 space-y-5">
@@ -84,7 +90,7 @@ export function DrawStage({ session, actions }: Props) {
     </div>
     <div className="border-y border-slate-200 py-6">
       {session.mode === 'student-prize' ? <label className="flex min-w-0 flex-col gap-2 text-sm font-medium text-slate-700">本轮学生
-        <select aria-describedby="candidate-help" value={selectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy} className="min-h-11 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-teal-700">
+        <select aria-describedby="candidate-help" value={effectiveSelectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy} className="min-h-11 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-teal-700">
           <option value="">请选择学生</option>{session.candidates.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={candidate.remaining <= 0 || candidate.archived}>{candidate.name}（剩余 {candidate.remaining} 次）</option>)}
         </select>
       </label> : <p className="min-h-11 rounded border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-medium">固定奖品：{fixedPrize?.name ?? '暂无奖品'}</p>}
@@ -96,7 +102,7 @@ export function DrawStage({ session, actions }: Props) {
     {error && <div role="alert" className="flex min-w-0 flex-wrap items-center gap-3 border-l-4 border-red-600 bg-red-50 px-3 py-3 text-sm text-red-800"><span className="min-w-0 break-words">{error}</span>{running && <button type="button" onClick={stop} disabled={busy} className="min-h-11 shrink-0 rounded border border-red-700 px-3 py-2 font-medium focus-visible:outline-2 focus-visible:outline-red-700">重试停止</button>}</div>}
     <div aria-live="polite" className={'flex min-h-32 min-w-0 items-center justify-center border border-slate-200 bg-white px-4 py-8 text-center text-2xl font-semibold text-slate-900 ' + stageClass}>{result ? <p className="min-w-0 break-words"><span>{result.studentName}</span><span aria-hidden="true"> · </span><span>{result.prizeName}</span></p> : running ? <p className="min-w-0 break-words">{ticker}</p> : <p className="text-lg text-slate-500">准备好后开始</p>}</div>
     <div className="flex flex-wrap gap-3">
-      {!running && !result && <button type="button" onClick={start} disabled={!canStart} className="min-h-11 min-w-32 rounded bg-teal-700 px-4 py-2 font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-slate-300 focus-visible:outline-2 focus-visible:outline-teal-700">开始抽奖</button>}
+      {!running && (!result || canStart) && <button type="button" onClick={result ? () => setResult(null) : start} disabled={!canStart} className="min-h-11 min-w-32 rounded bg-teal-700 px-4 py-2 font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-slate-300 focus-visible:outline-2 focus-visible:outline-teal-700">{result ? '下一轮' : '开始抽奖'}</button>}
       {running && <><button type="button" onClick={stop} disabled={busy} className="min-h-11 min-w-32 rounded bg-teal-700 px-4 py-2 font-semibold text-white hover:bg-teal-800 disabled:cursor-wait disabled:bg-slate-300 focus-visible:outline-2 focus-visible:outline-teal-700">停止</button><button type="button" onClick={cancel} disabled={busy} className="min-h-11 min-w-32 rounded border border-slate-400 bg-white px-4 py-2 font-semibold text-slate-800 hover:bg-slate-50 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-teal-700">取消轮次</button></>}
     </div>
     {result && <p role="status" className="border-l-4 border-teal-600 bg-teal-50 px-3 py-3 text-sm text-teal-900">中奖结果已由服务端确认并保存。</p>}

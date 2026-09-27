@@ -30,7 +30,7 @@ export default async function SessionSetupPage({ params, searchParams }: {
       <Link aria-current={mode === 'student-prize' ? 'page' : undefined} className={`rounded px-3 py-2 ${mode === 'student-prize' ? 'bg-teal-700 text-white' : 'bg-white text-teal-800'}`} href={`?mode=student-prize${query}`}>指定学生 · 随机奖品</Link>
       <Link aria-current={mode === 'prize-student' ? 'page' : undefined} className={`rounded px-3 py-2 ${mode === 'prize-student' ? 'bg-teal-700 text-white' : 'bg-white text-teal-800'}`} href={`?mode=prize-student${query}`}>指定奖品 · 随机学生</Link>
     </nav>
-    <ActionForm action={saveSessionAction} label="保存草稿">
+    <ActionForm action={saveSessionAction} label="保存草稿" successHref={`/classes/${classId}/lotteries`}>
       <input type="hidden" name="classId" value={classId} /><input type="hidden" name="mode" value={mode} />
       {sessionId && <input type="hidden" name="sessionId" value={sessionId} />}
       <fieldset className="w-full space-y-2"><legend className="mb-2 font-semibold">候选学生</legend>

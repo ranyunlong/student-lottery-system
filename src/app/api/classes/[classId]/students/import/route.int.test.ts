@@ -96,3 +96,13 @@ test('cross-origin and missing-origin uploads are refused before parsing', async
   expect((await POST(external, context(classId))).status).toBe(403);
   expect((await POST(new Request(url(classId), { method: 'POST', body: form }), context(classId))).status).toBe(403);
 });
+
+test('same-origin validation uses the external host when the framework URL is normalized', async () => {
+  cookie = adminCookie;
+  const form = new FormData();
+  form.set('intent', 'preview');
+  form.set('file', new File([new Uint8Array(bytes)], 'students.xlsx'));
+  const request = new Request(url(classId), { method: 'POST',
+    headers: { origin: 'http://127.0.0.1:3215', host: '127.0.0.1:3215', 'x-forwarded-proto': 'http' }, body: form });
+  expect((await POST(request, context(classId))).status).toBe(200);
+});
