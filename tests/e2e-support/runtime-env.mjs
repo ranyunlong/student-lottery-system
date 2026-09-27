@@ -5,16 +5,16 @@ import pg from 'pg';
 const allowedHosts = new Set(['127.0.0.1', 'localhost']);
 const databaseMarker = 'student-lottery-e2e:v1';
 
-export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL) {
+export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL, variableName = 'E2E_DATABASE_URL') {
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('E2E_DATABASE_URL is required; provide credentials for the dedicated PostgreSQL database at 127.0.0.1:55433/lottery_e2e.');
+    throw new Error(`${variableName} is required; provide credentials for the dedicated PostgreSQL database at 127.0.0.1:55433/lottery_e2e.`);
   }
 
   let databaseUrl;
   try {
     databaseUrl = new URL(value);
   } catch {
-    throw new Error('E2E_DATABASE_URL must be a valid PostgreSQL connection URL for the dedicated local E2E database.');
+    throw new Error(`${variableName} must be a valid PostgreSQL connection URL for the dedicated local E2E database.`);
   }
 
   if (
@@ -27,16 +27,16 @@ export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL) {
     || databaseUrl.search.length > 0
     || databaseUrl.hash.length > 0
   ) {
-    throw new Error('Refusing E2E_DATABASE_URL: it must target only localhost:55433/lottery_e2e with PostgreSQL credentials and no query or fragment.');
+    throw new Error(`Refusing ${variableName}: it must target only localhost:55433/lottery_e2e with PostgreSQL credentials and no query or fragment.`);
   }
 
   return value;
 }
 
-export function validateE2EDatabaseIdentity(identity) {
+export function validateE2EDatabaseIdentity(identity, expectedDatabase = 'lottery_e2e', expectedMarker = databaseMarker) {
   if (
-    identity?.database !== 'lottery_e2e'
-    || identity.marker !== databaseMarker
+    identity?.database !== expectedDatabase
+    || identity.marker !== expectedMarker
     || !identity.user
     || identity.user === identity.tableOwner
     || identity.user === identity.databaseOwner
@@ -53,7 +53,7 @@ export function validateE2EDatabaseIdentity(identity) {
     || identity.canTruncateWinningRecords
     || identity.canManageWinningRecordTriggers
   ) {
-    throw new Error('Refusing E2E database: expected the marked lottery_e2e database and a non-owner, non-privileged runner role with fixture DML access.');
+    throw new Error('Refusing E2E database: expected the marked invocation database and a non-owner, non-privileged runner role with fixture DML access.');
   }
 
   return true;

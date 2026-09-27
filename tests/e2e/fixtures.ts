@@ -6,15 +6,18 @@ import { test as base, expect, type Page } from '@playwright/test';
 import { auth } from '../../src/lib/auth';
 import { user } from '../../src/db/auth-schema';
 import { db, pool } from '../../src/db/client';
-import { createFixturePassword, validateE2EDatabaseUrl } from '../e2e-support/runtime-env.mjs';
+import { createFixturePassword } from '../e2e-support/runtime-env.mjs';
 import {
   adminAudit, classTeachers, classes, lotteryRounds, lotterySessions, prizes,
   redemptionAudit, sessionPrizes, sessionStudents, stockEvents, students, winningRecords,
 } from '../../src/db/schema';
 
-const requiredDatabase = validateE2EDatabaseUrl();
-if (process.env.DATABASE_URL !== requiredDatabase) {
-  throw new Error('Playwright fixtures may only use the dedicated PostgreSQL 17 E2E database');
+if (
+  process.env.DATABASE_URL !== process.env.E2E_RUN_DATABASE_URL
+  || !/^lottery_e2e_run_[a-f0-9]{32}$/.test(process.env.E2E_RUN_DATABASE_NAME ?? '')
+  || new URL(process.env.DATABASE_URL ?? '').pathname !== `/${process.env.E2E_RUN_DATABASE_NAME}`
+) {
+  throw new Error('Playwright fixtures may only use this invocation’s isolated PostgreSQL 17 E2E database.');
 }
 
 export type TeacherSession = {

@@ -14,6 +14,7 @@ test('E2E runtime requires the dedicated database and creates ephemeral secrets'
   const { validateE2EDatabaseUrl, createRuntimeSecret, createFixturePassword } = await import(pathToFileURL(runtimeModule));
 
   assert.throws(() => validateE2EDatabaseUrl(), /E2E_DATABASE_URL is required/);
+  assert.throws(() => validateE2EDatabaseUrl(undefined, 'E2E_DATABASE_ADMIN_URL'), /E2E_DATABASE_ADMIN_URL is required/);
   for (const validUrl of [
     'postgres://demo:placeholder@127.0.0.1:55433/lottery_e2e',
     'postgresql://demo:placeholder@localhost:55433/lottery_e2e',
@@ -92,8 +93,12 @@ test('E2E runner reports the Chromium installation command before starting the a
     () => assertChromiumInstalled('missing-chromium.exe', () => false),
     /npx playwright install chromium/,
   );
+  const server = await readFile(resolve(projectRoot, 'tests/e2e/server.mjs'), 'utf8');
   assert.match(runner, /assertChromiumInstalled\(chromium\.executablePath\(\)\)/);
-  assert.ok(runner.indexOf('assertChromiumInstalled') < runner.indexOf('await app.prepare()'));
+  assert.ok(runner.indexOf('assertChromiumInstalled') < runner.indexOf("tests/e2e/server.mjs"));
+  assert.ok(runner.indexOf('await stopE2EServer(appServer)') < runner.indexOf('await removeE2ERunDatabase(process.env'));
+  assert.match(server, /await app\.prepare\(\)/);
+  assert.match(server, /type: 'ready'/);
   assert.match(readme, /npx playwright install chromium/);
 });
 
@@ -122,9 +127,10 @@ test('E2E entrypoint and sources do not embed database or account credentials', 
   assert.doesNotMatch(source, /\b(?:temporaryPassword|permanentPassword|changedPassword)\s*=\s*['"`]/i);
 });
 
-test('E2E runner rejects a missing database URL before starting Next.js', () => {
+test('E2E runner rejects a missing provisioning URL before starting Next.js', () => {
   const env = { ...process.env };
   delete env.E2E_DATABASE_URL;
+  delete env.E2E_DATABASE_ADMIN_URL;
   const result = spawnSync(process.execPath, [resolve(projectRoot, 'tests/e2e/run.mjs')], {
     cwd: projectRoot,
     env,
@@ -133,6 +139,6 @@ test('E2E runner rejects a missing database URL before starting Next.js', () => 
   });
 
   assert.equal(result.status, 1, result.error?.message ?? result.stderr);
-  assert.match(result.stderr, /E2E_DATABASE_URL is required/);
+  assert.match(result.stderr, /E2E_DATABASE_ADMIN_URL is required/);
   assert.doesNotMatch(result.stdout, /E2E Next server listening/);
 });
