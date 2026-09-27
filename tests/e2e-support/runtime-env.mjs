@@ -4,6 +4,25 @@ import pg from 'pg';
 
 const allowedHosts = new Set(['127.0.0.1', 'localhost']);
 const databaseMarker = 'student-lottery-e2e:v1';
+const inheritedChildEnvironmentKeys = [
+  'PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA',
+  'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'ProgramData', 'COMSPEC', 'PATHEXT',
+];
+const runtimeChildEnvironmentKeys = [
+  'DATABASE_URL', 'E2E_RUN_DATABASE_URL', 'E2E_RUN_DATABASE_NAME',
+  'BETTER_AUTH_SECRET', 'BETTER_AUTH_URL', 'EMBLEM_DIR', 'CIRCLE_NODE_TOTAL',
+];
+
+export function createE2EChildEnvironment(parentEnvironment, runtimeEnvironment) {
+  const childEnvironment = {};
+  for (const key of inheritedChildEnvironmentKeys) {
+    if (typeof parentEnvironment[key] === 'string') childEnvironment[key] = parentEnvironment[key];
+  }
+  for (const key of runtimeChildEnvironmentKeys) {
+    if (typeof runtimeEnvironment[key] === 'string') childEnvironment[key] = runtimeEnvironment[key];
+  }
+  return childEnvironment;
+}
 
 export function validateE2EDatabaseUrl(value = process.env.E2E_DATABASE_URL, variableName = 'E2E_DATABASE_URL') {
   if (typeof value !== 'string' || value.length === 0) {

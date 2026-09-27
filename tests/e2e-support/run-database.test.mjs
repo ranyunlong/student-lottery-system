@@ -24,6 +24,83 @@ test('cleanup refuses the base database and mismatched run identities before con
   );
 });
 
+test('marked cleanup retries transient errors a bounded number of times', async () => {
+  const { retryE2ECleanup } = await import('./run-database.mjs');
+  let attempts = 0;
+  const result = await retryE2ECleanup(async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error('transient drop race');
+    return 'removed';
+  }, { delay: () => 0 });
+  assert.equal(result, 'removed');
+  assert.equal(attempts, 3);
+
+  attempts = 0;
+  await assert.rejects(retryE2ECleanup(async () => {
+    attempts += 1;
+    throw new Error('persistent cleanup failure');
+  }, { delay: () => 0 }), /persistent cleanup failure/);
+  assert.equal(attempts, 5);
+});
+
+test('explicit recovery refuses active runs and removes only the selected marked run', {
+  skip: !adminUrl && 'requires the process-scoped dedicated E2E database admin URL',
+  timeout: 120_000,
+}, async () => {
+  const { acquireE2ERunLease, createE2ERunDatabase, recoverE2ERunDatabase, removeE2ERunDatabase } = await import('./run-database.mjs');
+  const admin = new pg.Client({ connectionString: adminUrl, connectionTimeoutMillis: 5000 });
+  await admin.connect();
+  const selected = await createE2ERunDatabase(adminUrl);
+  const concurrent = await createE2ERunDatabase(adminUrl);
+  const liveClient = new pg.Client({ connectionString: selected.databaseUrl, connectionTimeoutMillis: 5000 });
+  let releaseLease;
+
+  try {
+    releaseLease = await acquireE2ERunLease(adminUrl, selected);
+    const runId = selected.database.slice('lottery_e2e_run_'.length);
+    await assert.rejects(recoverE2ERunDatabase(adminUrl, runId), /already active/i);
+    await releaseLease();
+    releaseLease = undefined;
+    await liveClient.connect();
+    await assert.rejects(recoverE2ERunDatabase(adminUrl, runId), /active connection/i);
+    const activeObjects = await admin.query(`
+      select
+        exists(select 1 from pg_database where datname = $1) as selected_database,
+        exists(select 1 from pg_roles where rolname = $2) as selected_role,
+        exists(select 1 from pg_database where datname = $3) as concurrent_database,
+        exists(select 1 from pg_roles where rolname = $4) as concurrent_role
+    `, [selected.database, selected.role, concurrent.database, concurrent.role]);
+    assert.deepEqual(activeObjects.rows, [{
+      selected_database: true,
+      selected_role: true,
+      concurrent_database: true,
+      concurrent_role: true,
+    }]);
+
+    await liveClient.end();
+    assert.equal(await recoverE2ERunDatabase(adminUrl, runId), true);
+    const recovered = await admin.query(`
+      select
+        exists(select 1 from pg_database where datname = $1) as selected_database,
+        exists(select 1 from pg_roles where rolname = $2) as selected_role,
+        exists(select 1 from pg_database where datname = $3) as concurrent_database,
+        exists(select 1 from pg_roles where rolname = $4) as concurrent_role
+    `, [selected.database, selected.role, concurrent.database, concurrent.role]);
+    assert.deepEqual(recovered.rows, [{
+      selected_database: false,
+      selected_role: false,
+      concurrent_database: true,
+      concurrent_role: true,
+    }]);
+  } finally {
+    if (releaseLease) await releaseLease().catch(() => {});
+    await liveClient.end().catch(() => {});
+    await removeE2ERunDatabase(adminUrl, selected).catch(() => {});
+    await removeE2ERunDatabase(adminUrl, concurrent);
+    await admin.end();
+  }
+});
+
 test('repeated E2E database lifecycles leave no run database or runner role behind', {
   skip: !adminUrl && 'requires the process-scoped dedicated E2E database admin URL',
   timeout: 120_000,

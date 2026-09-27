@@ -33,7 +33,15 @@ COMMENT ON DATABASE lottery_e2e IS 'student-lottery-e2e:v1';
 
 在当前 shell 或本机密钥管理器中设置 `E2E_DATABASE_ADMIN_URL`，仅指向专用服务中的 `127.0.0.1:55433/lottery_e2e`。该 provisioning 角色需能创建数据库/角色并终止其临时数据库中的连接（专用本地测试容器可使用管理员角色）；不要将 URL、密码写入仓库、日志或报告。入口会验证 loopback 目标、数据库 comment 和 provisioning 权限。不要将该变量指向集成测试库、开发库或生产库。
 
-每次 `npm run test:e2e` 都会生成 UUID 命名的隔离数据库和非特权应用角色，在该数据库执行现有 Drizzle migrations，再验证 owner、DML grants 和中奖记录保护 trigger。Playwright fixture 与 Next 只接收该次生成的受限角色 URL。运行结束时 runner 只删除同时匹配本次随机名称和数据库/角色标记的对象；基础 `lottery_e2e` 数据库、已有中奖结果和其他数据库不会被清理或覆盖。中断进程可能阻止 finally 清理；正常成功或测试失败退出都会尝试删除本次创建的对象。
+每次 `npm run test:e2e` 都会生成 UUID 命名的隔离数据库和非特权应用角色，在该数据库执行现有 Drizzle migrations，再验证 owner、DML grants 和中奖记录保护 trigger。Next 与 Playwright 子进程只收到必要的系统变量和本次生成的受限角色 URL；provisioning URL 不会传给子进程。运行期间 runner 在专用基础库持有本次 run 的 advisory lease。正常成功、测试失败及 SIGINT/SIGTERM 都会有界停止 Playwright 和 Next，再按数据库/角色 marker 回收该 run；数据库连接终止会等待并重试，最多五次。基础 `lottery_e2e` 数据库、已有中奖结果和其他 run 不会被清理或覆盖。
+
+runner 会在创建隔离数据库后打印不含凭据的 run ID。若有界清理失败，输出该 run 的回收命令；在确认对应测试进程已停止后，使用同一个 `E2E_DATABASE_ADMIN_URL` 执行：
+
+```sh
+node tests/e2e/run.mjs --recover=<run-id>
+```
+
+恢复入口只接受完整 run ID，重新验证专用基础库身份、数据库和角色 comment marker、活动连接，并取得该 run 的 advisory lease；活动中的 run 会被拒绝。SIGKILL、系统崩溃或断电会跳过 finally，可能留下隔离数据库和角色，不能保证自动清理。若没有保留 runner 输出中的 ID，只在专用 `lottery_e2e` 上只读列出 `lottery_e2e_run_*` 数据库 comment 与 `lottery_e2e_app_*` 角色 comment，按相同 UUID 后缀和完整 `student-lottery-e2e-run:v1:<id>` / `student-lottery-e2e-role:v1:<id>` marker 配对；确认没有相关 runner/Next/Playwright 进程后，再对该单一 ID 使用上述恢复命令。不要对名称前缀执行批量 DROP，也不要删除任何卷。
 
 安装依赖并安装 Playwright Chromium 浏览器二进制：
 

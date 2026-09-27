@@ -39,6 +39,20 @@ async function withAdmin(url, operation) {
   }
 }
 
+export async function retryE2ECleanup(operation, { delay = (attempt) => 250 * (2 ** attempt) } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error.message?.startsWith('Refusing')) throw error;
+      lastError = error;
+      if (attempt < 4) await delay(attempt);
+    }
+  }
+  throw new Error(`Could not clean the marked E2E run after bounded retries: ${lastError?.message ?? 'unknown database error'}`);
+}
+
 export async function verifyE2EBaseDatabase(value = process.env.E2E_DATABASE_ADMIN_URL) {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error('E2E_DATABASE_ADMIN_URL is required; provide a process-scoped provisioning URL for the marked local PostgreSQL 17 E2E database.');
@@ -65,6 +79,21 @@ export async function verifyE2EBaseDatabase(value = process.env.E2E_DATABASE_ADM
     }
   });
   return connectionString;
+}
+
+export async function acquireE2ERunLease(value, run) {
+  assertRunIdentity(run);
+  const adminUrl = await verifyE2EBaseDatabase(value);
+  const client = new pg.Client({ connectionString: adminUrl, connectionTimeoutMillis: 5000 });
+  await client.connect();
+  try {
+    const { rows } = await client.query('select pg_try_advisory_lock(hashtextextended($1, 0)) as acquired', [run.marker]);
+    if (!rows[0]?.acquired) throw new Error('This E2E run is already active and cannot be recovered concurrently.');
+  } catch (error) {
+    await client.end().catch(() => {});
+    throw error;
+  }
+  return async () => client.end();
 }
 
 export async function verifyE2ERunDatabase(run) {
@@ -187,35 +216,104 @@ export async function createE2ERunDatabase(value = process.env.E2E_DATABASE_ADMI
       try {
         await removeE2ERunDatabase(adminUrl, run, { databaseCreated, roleCreated });
       } catch {
-        throw new Error('E2E database setup failed and its invocation-owned temporary objects could not be cleaned up.');
+        const runId = run.database.slice(runPrefix.length);
+        throw new Error(`E2E setup failed and run ${runId} could not be cleaned up. After confirming no E2E process is active, recover with: node tests/e2e/run.mjs --recover=${runId}`);
       }
     }
     throw new Error('E2E run database setup failed; credentials and connection details were withheld.');
   }
 }
 
-export async function removeE2ERunDatabase(value, run, created = { databaseCreated: true, roleCreated: true }) {
-  assertRunIdentity(run);
-  const adminUrl = validateE2EDatabaseUrl(value, 'E2E_DATABASE_ADMIN_URL');
-  await withAdmin(adminUrl, async (client) => {
-    if (created.databaseCreated) {
-      const { rows } = await client.query("select shobj_description(oid, 'pg_database') as marker from pg_database where datname = $1", [run.database]);
-      if (rows.length > 0) {
-        if (rows[0].marker !== run.marker) throw new Error('Refusing to drop a database without this run’s identity marker.');
-        await client.query('select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()', [run.database]);
+async function cleanupMarkedRun(client, run, created) {
+  if (created.databaseCreated) {
+    const { rows } = await client.query(
+      'select shobj_description(oid, \'pg_database\') as marker from pg_database where datname = $1',
+      [run.database],
+    );
+    if (rows.length > 0) {
+      if (rows[0].marker !== run.marker) throw new Error('Refusing to drop a database without this run’s identity marker.');
+      await client.query(
+        'select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()',
+        [run.database],
+      );
+
+      const deadline = Date.now() + 3000;
+      let activeConnections;
+      do {
+        const active = await client.query('select count(*)::int as count from pg_stat_activity where datname = $1', [run.database]);
+        activeConnections = active.rows[0].count;
+        if (activeConnections === 0) break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      } while (Date.now() < deadline);
+      if (activeConnections !== 0) throw new Error('Timed out waiting for this marked E2E database connections to stop.');
+
+      const current = await client.query(
+        'select shobj_description(oid, \'pg_database\') as marker from pg_database where datname = $1',
+        [run.database],
+      );
+      if (current.rows.length > 0) {
+        if (current.rows[0].marker !== run.marker) throw new Error('Refusing to drop a database whose run marker changed.');
         await client.query(`DROP DATABASE ${quoteIdentifier(run.database)}`);
       }
     }
+  }
 
-    if (created.roleCreated) {
-      const { rows } = await client.query(`
-        select shobj_description(oid, 'pg_authid') as marker
-        from pg_roles where rolname = $1
-      `, [run.role]);
-      if (rows.length > 0) {
-        if (rows[0].marker !== run.roleMarker) throw new Error('Refusing to drop a role without this run’s identity marker.');
-        await client.query(`DROP ROLE ${quoteIdentifier(run.role)}`);
-      }
+  if (created.roleCreated) {
+    const { rows } = await client.query(`
+      select shobj_description(oid, 'pg_authid') as marker
+      from pg_roles where rolname = $1
+    `, [run.role]);
+    if (rows.length > 0) {
+      if (rows[0].marker !== run.roleMarker) throw new Error('Refusing to drop a role without this run’s identity marker.');
+      await client.query(`DROP ROLE ${quoteIdentifier(run.role)}`);
     }
-  });
+  }
+}
+
+export async function removeE2ERunDatabase(value, run, created = { databaseCreated: true, roleCreated: true }) {
+  assertRunIdentity(run);
+  const adminUrl = validateE2EDatabaseUrl(value, 'E2E_DATABASE_ADMIN_URL');
+  return retryE2ECleanup(
+    () => withAdmin(adminUrl, (client) => cleanupMarkedRun(client, run, created)),
+  );
+}
+
+export async function recoverE2ERunDatabase(value = process.env.E2E_DATABASE_ADMIN_URL, runId) {
+  if (typeof runId !== 'string' || !/^[a-f0-9]{32}$/.test(runId)) {
+    throw new Error('Recovery requires the exact 32-character E2E run ID printed by the failed invocation.');
+  }
+  const run = {
+    database: `${runPrefix}${runId}`,
+    role: `${rolePrefix}${runId}`,
+    marker: `student-lottery-e2e-run:v1:${runId}`,
+    roleMarker: `student-lottery-e2e-role:v1:${runId}`,
+  };
+  const releaseLease = await acquireE2ERunLease(value, run);
+  try {
+    const adminUrl = await verifyE2EBaseDatabase(value);
+    await withAdmin(adminUrl, async (client) => {
+      const [database, role] = await Promise.all([
+        client.query('select shobj_description(oid, \'pg_database\') as marker from pg_database where datname = $1', [run.database]),
+        client.query("select shobj_description(oid, 'pg_authid') as marker from pg_roles where rolname = $1", [run.role]),
+      ]);
+      if (database.rows.length === 0 && role.rows.length === 0) {
+        throw new Error('No invocation-owned E2E database or role exists for that run ID.');
+      }
+      if (database.rows.length > 0 && database.rows[0].marker !== run.marker) {
+        throw new Error('Refusing recovery: the database marker does not match the requested run ID.');
+      }
+      if (role.rows.length > 0 && role.rows[0].marker !== run.roleMarker) {
+        throw new Error('Refusing recovery: the role marker does not match the requested run ID.');
+      }
+      const active = await client.query('select count(*)::int as count from pg_stat_activity where datname = $1', [run.database]);
+      if (active.rows[0].count > 0) throw new Error('Refusing recovery while the selected E2E database has active connections.');
+    });
+    await removeE2ERunDatabase(value, run, {
+      databaseCreated: true,
+      roleCreated: true,
+    });
+    return true;
+  } finally {
+    await releaseLease();
+  }
 }
