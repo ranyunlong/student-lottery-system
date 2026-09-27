@@ -43,6 +43,8 @@ test('admin provisioning credentials are never inherited by app or Playwright ch
   const runner = await readFile(resolve(projectRoot, 'tests/e2e/run.mjs'), 'utf8');
   const parentEnvironment = {
     PATH: 'trusted-runtime-path',
+    HOME: '/home/e2e-user',
+    PLAYWRIGHT_BROWSERS_PATH: '/opt/playwright-browsers',
     SystemRoot: 'C:\\Windows',
     E2E_DATABASE_ADMIN_URL: 'admin-only-sentinel',
     E2E_DATABASE_URL: 'old-runner-sentinel',
@@ -62,6 +64,8 @@ test('admin provisioning credentials are never inherited by app or Playwright ch
   const childEnvironment = createE2EChildEnvironment(parentEnvironment, runtimeEnvironment);
 
   assert.equal(childEnvironment.PATH, parentEnvironment.PATH);
+  assert.equal(childEnvironment.HOME, parentEnvironment.HOME);
+  assert.equal(childEnvironment.PLAYWRIGHT_BROWSERS_PATH, parentEnvironment.PLAYWRIGHT_BROWSERS_PATH);
   assert.equal(childEnvironment.SystemRoot, parentEnvironment.SystemRoot);
   assert.equal(childEnvironment.DATABASE_URL, runtimeEnvironment.DATABASE_URL);
   assert.equal(childEnvironment.BETTER_AUTH_SECRET, runtimeEnvironment.BETTER_AUTH_SECRET);

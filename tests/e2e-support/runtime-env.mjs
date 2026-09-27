@@ -6,6 +6,7 @@ const allowedHosts = new Set(['127.0.0.1', 'localhost']);
 const databaseMarker = 'student-lottery-e2e:v1';
 const inheritedChildEnvironmentKeys = [
   'PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA',
+  'HOME', 'PLAYWRIGHT_BROWSERS_PATH',
   'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'ProgramData', 'COMSPEC', 'PATHEXT',
 ];
 const runtimeChildEnvironmentKeys = [
