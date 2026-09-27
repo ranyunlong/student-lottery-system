@@ -422,6 +422,19 @@ test.each([false, true])('refuses to archive an active session (active round: %s
   expect(await db.select().from(adminAudit).where(eq(adminAudit.classId, classId)).orderBy(asc(adminAudit.createdAt))).toEqual(auditBefore);
 });
 
+test('refuses to archive an active round even when its session is no longer active', async () => {
+  const { classId, sessionId } = await createActiveLottery('异常轮次归档拒绝');
+  await db.insert(lotteryRounds).values({ classId, sessionId, startToken: randomUUID(), startedBy: adminId });
+  await db.update(lotterySessions).set({ status: 'completed', completedAt: new Date() }).where(eq(lotterySessions.id, sessionId));
+  const auditBefore = await db.select().from(adminAudit).where(eq(adminAudit.classId, classId));
+
+  await expect(archiveClass(classId)).rejects.toThrow('进行中的轮次');
+
+  expect((await db.select().from(classes).where(eq(classes.id, classId)))[0].archived).toBe(false);
+  expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId)))[0].status).toBe('active');
+  expect(await db.select().from(adminAudit).where(eq(adminAudit.classId, classId))).toEqual(auditBefore);
+});
+
 test('allows archival after session completion without changing session or round history', async () => {
   const { classId, sessionId } = await createActiveLottery('完成后归档');
   const draw = await startRound(sessionId, adminId);
