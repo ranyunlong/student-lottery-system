@@ -3,11 +3,13 @@ import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest';
 import { asc, eq, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
 import { account, user } from '../../db/auth-schema';
-import { adminAudit, classes } from '../../db/schema';
+import { adminAudit, classes, lotteryRounds, lotterySessions, prizes, stockEvents, students, winningRecords } from '../../db/schema';
 import { auth } from '../../lib/auth';
 import { requireClassAccess } from '../../lib/access';
 import { createTeacher, createClass, assignTeacher, removeTeacher, listClassTeacherIds, archiveClass, updateClass, updateTeacher, disableTeacher, resetTeacherPassword, listTeachers, listClasses, listTeacherClasses, listAdminAudit } from './service';
 import { createTeacherAction, createClassAction, assignTeacherAction, removeTeacherAction, archiveClassAction, updateClassAction, updateTeacherAction, disableTeacherAction, resetTeacherPasswordAction } from './actions';
+import { activateSession, completeSession, createSession } from '../lotteries/sessions';
+import { startRound, stopRound } from '../lotteries/rounds';
 
 let activeCookie = '';
 vi.mock('next/headers', () => ({ headers: async () => new Headers({ cookie: activeCookie }) }));
@@ -91,6 +93,29 @@ function formData(values: Record<string, string>) {
   const data = new FormData();
   for (const [key, value] of Object.entries(values)) data.set(key, value);
   return data;
+}
+
+async function createActiveLottery(label: string) {
+  const classId = await createClass(label);
+  const [{ id: studentId }] = await db.insert(students).values({ classId, studentNumber: '001', name: '候选学生' })
+    .returning({ id: students.id });
+  const [{ id: prizeId }] = await db.insert(prizes).values({ classId, name: '候选奖品', stock: 1 })
+    .returning({ id: prizes.id });
+  const sessionId = await createSession(classId, { mode: 'prize-student', studentIds: [studentId], prizeId, roundCount: 1 });
+  await activateSession(sessionId);
+  return { classId, sessionId };
+}
+
+async function waitForClassLockWaiters(minimum: number) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const result = await pool.query<{ count: number }>(`SELECT COUNT(*)::int AS count
+      FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid() AND datname = current_database()
+        AND wait_event_type = 'Lock' AND query ILIKE '%classes%'`);
+    if (result.rows[0].count >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`等待班级行锁的并发事务不足 ${minimum} 个`);
 }
 
 test('creates teachers and class, changes assignments and audits the authenticated actor', async () => {
@@ -379,6 +404,114 @@ test('renames active class with actor audit and rejects edits after archival', a
   expect(event).toMatchObject({ actorId: adminId, classId, details: { name: '新班名' } });
   await archiveClass(classId);
   await expect(updateClass(classId, '再修改')).rejects.toThrow();
+});
+
+test.each([false, true])('refuses to archive an active session (active round: %s) without changing state or audit', async (withActiveRound) => {
+  const { classId, sessionId } = await createActiveLottery(`进行中归档拒绝-${withActiveRound}`);
+  if (withActiveRound) {
+    await db.insert(lotteryRounds).values({ classId, sessionId, startToken: randomUUID(), startedBy: adminId });
+  }
+  const auditBefore = await db.select().from(adminAudit).where(eq(adminAudit.classId, classId)).orderBy(asc(adminAudit.createdAt));
+
+  await expect(archiveClass(classId)).rejects.toThrow('进行中的场次');
+
+  expect((await db.select().from(classes).where(eq(classes.id, classId)))[0].archived).toBe(false);
+  expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('active');
+  expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId))).map((round) => round.status))
+    .toEqual(withActiveRound ? ['active'] : []);
+  expect(await db.select().from(adminAudit).where(eq(adminAudit.classId, classId)).orderBy(asc(adminAudit.createdAt))).toEqual(auditBefore);
+});
+
+test('allows archival after session completion without changing session or round history', async () => {
+  const { classId, sessionId } = await createActiveLottery('完成后归档');
+  const draw = await startRound(sessionId, adminId);
+  await stopRound(draw.token, adminId);
+  await completeSession(sessionId);
+  const sessionBefore = (await db.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0];
+  const roundsBefore = await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId));
+  const winsBefore = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, sessionId));
+  const stockEventsBefore = await db.select().from(stockEvents).where(eq(stockEvents.classId, classId));
+
+  await archiveClass(classId);
+
+  expect((await db.select().from(classes).where(eq(classes.id, classId)))[0].archived).toBe(true);
+  expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0]).toEqual(sessionBefore);
+  expect(await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId))).toEqual(roundsBefore);
+  expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, sessionId))).toEqual(winsBefore);
+  expect(await db.select().from(stockEvents).where(eq(stockEvents.classId, classId))).toEqual(stockEventsBefore);
+  await expect(stopRound(draw.token, adminId)).rejects.toThrow('已归档');
+  expect((await db.select().from(adminAudit).where(eq(adminAudit.classId, classId)).orderBy(asc(adminAudit.createdAt)))
+    .map((event) => event.action)).toEqual(['class.create', 'class.archive']);
+});
+
+test('serializes activation before archival and rejects archival after activation commits', async () => {
+  const classId = await createClass('激活先于归档');
+  const [{ id: studentId }] = await db.insert(students).values({ classId, studentNumber: '001', name: '候选学生' })
+    .returning({ id: students.id });
+  const [{ id: prizeId }] = await db.insert(prizes).values({ classId, name: '候选奖品', stock: 1 })
+    .returning({ id: prizes.id });
+  const sessionId = await createSession(classId, { mode: 'prize-student', studentIds: [studentId], prizeId, roundCount: 1 });
+  let release!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = db.transaction(async (tx) => {
+    await tx.select({ id: classes.id }).from(classes).where(eq(classes.id, classId)).for('update');
+    locked(); await gate;
+  });
+  await acquired;
+  const activation = activateSession(sessionId).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForClassLockWaiters(1);
+    const archival = archiveClass(classId).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    await waitForClassLockWaiters(2);
+    release();
+    await holder;
+    const [activated, archived] = await Promise.all([activation, archival]);
+    expect(activated).toEqual({ ok: true });
+    expect(archived.ok).toBe(false);
+    if (!archived.ok) expect(String(archived.error)).toContain('进行中的场次');
+  } finally {
+    release();
+    await holder;
+  }
+  expect((await db.select().from(classes).where(eq(classes.id, classId)))[0].archived).toBe(false);
+  expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('active');
+});
+
+test('serializes archival before activation and refuses activation after archival commits', async () => {
+  const classId = await createClass('归档先于激活');
+  const [{ id: studentId }] = await db.insert(students).values({ classId, studentNumber: '001', name: '候选学生' })
+    .returning({ id: students.id });
+  const [{ id: prizeId }] = await db.insert(prizes).values({ classId, name: '候选奖品', stock: 1 })
+    .returning({ id: prizes.id });
+  const sessionId = await createSession(classId, { mode: 'prize-student', studentIds: [studentId], prizeId, roundCount: 1 });
+  let release!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = db.transaction(async (tx) => {
+    await tx.select({ id: classes.id }).from(classes).where(eq(classes.id, classId)).for('update');
+    locked(); await gate;
+  });
+  await acquired;
+  const archival = archiveClass(classId).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+  try {
+    await waitForClassLockWaiters(1);
+    const activation = activateSession(sessionId).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    await waitForClassLockWaiters(2);
+    release();
+    await holder;
+    const [archived, activated] = await Promise.all([archival, activation]);
+    expect(archived).toEqual({ ok: true });
+    expect(activated.ok).toBe(false);
+    if (!activated.ok) expect(String(activated.error)).toContain('已归档');
+  } finally {
+    release();
+    await holder;
+  }
+  expect((await db.select().from(classes).where(eq(classes.id, classId)))[0].archived).toBe(true);
+  expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('draft');
+  await expect(startRound(sessionId, adminId)).rejects.toThrow('已归档');
+  expect(await db.select().from(lotteryRounds).where(eq(lotteryRounds.sessionId, sessionId))).toEqual([]);
 });
 
 test('teacher class list contains only active assigned classes', async () => {

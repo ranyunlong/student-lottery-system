@@ -3,7 +3,7 @@ import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import { db } from '../../db/client';
 import { account, user } from '../../db/auth-schema';
-import { adminAudit, classes, classTeachers } from '../../db/schema';
+import { adminAudit, classes, classTeachers, lotterySessions } from '../../db/schema';
 import { requireAdmin, requireSession, ForbiddenError } from '../../lib/access';
 import { auth } from '../../lib/auth';
 
@@ -214,6 +214,12 @@ export async function listClassTeacherIds(classId: string): Promise<string[]> {
 export async function archiveClass(classId: string): Promise<void> {
   const actorId = await requireAdmin();
   await db.transaction(async (tx) => {
+    const [target] = await tx.select({ archived: classes.archived }).from(classes)
+      .where(eq(classes.id, classId)).for('update');
+    if (!target || target.archived) throw new Error('班级不存在或已归档');
+    const [activeSession] = await tx.select({ id: lotterySessions.id }).from(lotterySessions)
+      .where(and(eq(lotterySessions.classId, classId), eq(lotterySessions.status, 'active'))).limit(1);
+    if (activeSession) throw new Error('班级存在进行中的场次，请先完成场次后再归档');
     const archived = await tx.update(classes).set({ archived: true })
       .where(and(eq(classes.id, classId), eq(classes.archived, false))).returning({ id: classes.id });
     if (!archived.length) throw new Error('班级不存在或已归档');
