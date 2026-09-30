@@ -1,11 +1,12 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, prizes, stockEvents } from '../../db/schema';
 import { ForbiddenError, requireClassAccess, requireSession } from '../../lib/access';
+import type { PrizeImportRow } from './excel';
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
-export type StockEvent = { prizeId: string; delta: number; reason: string; actorId: string; createdAt: Date };
+export type StockEvent = { prizeId: string; delta: number; reason: string; actorId: string; actorName: string; createdAt: Date };
 
 async function requireMutationAccess(tx: Transaction, classId: string, actorId: string): Promise<void> {
   const [target] = await tx.select({ archived: classes.archived }).from(classes)
@@ -68,6 +69,41 @@ export async function adjustStock(classId: string, prizeId: string, delta: numbe
   });
 }
 
+export async function importPrizes(classId: string, rows: PrizeImportRow[]): Promise<{ inserted: number; updated: number }> {
+  const { userId } = await requireSession();
+  if (!Array.isArray(rows) || !rows.length || rows.length > 500) throw new Error('请输入 1 至 500 种奖品');
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row || typeof row.name !== 'string' || !row.name.trim() || row.name !== row.name.trim()
+      || row.name.length > 200 || !Number.isSafeInteger(row.quantity) || row.quantity < 1 || row.quantity > 2147483647
+      || seen.has(row.name)) throw new Error('奖品导入数据无效');
+    seen.add(row.name);
+  }
+  return db.transaction(async (tx) => {
+    await requireMutationAccess(tx, classId, userId);
+    const existing = await tx.select({ id: prizes.id, name: prizes.name }).from(prizes)
+      .where(and(eq(prizes.classId, classId), eq(prizes.archived, false), inArray(prizes.name, rows.map((row) => row.name))));
+    const byName = new Map(existing.map((item) => [item.name, item.id]));
+    let inserted = 0;
+    for (const row of rows) {
+      let prizeId = byName.get(row.name);
+      if (prizeId) {
+        const [updated] = await tx.update(prizes).set({ stock: sql`${prizes.stock} + ${row.quantity}` })
+          .where(and(eq(prizes.id, prizeId), sql`${prizes.stock} + ${row.quantity} <= 2147483647`))
+          .returning({ id: prizes.id });
+        if (!updated) throw new Error(`“${row.name}”库存数量超出范围`);
+      } else {
+        const [created] = await tx.insert(prizes).values({ classId, name: row.name, stock: row.quantity }).returning({ id: prizes.id });
+        prizeId = created.id;
+        inserted++;
+      }
+      await tx.insert(stockEvents).values({ classId, prizeId, delta: row.quantity,
+        reason: 'Excel 导入补充库存', actorId: userId });
+    }
+    return { inserted, updated: rows.length - inserted };
+  });
+}
+
 async function accessiblePrize(prizeId: string) {
   const [prize] = await db.select({ id: prizes.id, classId: prizes.classId, stock: prizes.stock })
     .from(prizes).where(eq(prizes.id, prizeId)).limit(1);
@@ -83,8 +119,8 @@ export async function getPrizeStock(prizeId: string): Promise<number> {
 export async function listStockEvents(prizeId: string): Promise<StockEvent[]> {
   await accessiblePrize(prizeId);
   return db.select({ prizeId: stockEvents.prizeId, delta: stockEvents.delta, reason: stockEvents.reason,
-    actorId: stockEvents.actorId, createdAt: stockEvents.createdAt })
-    .from(stockEvents).where(eq(stockEvents.prizeId, prizeId))
+    actorId: stockEvents.actorId, actorName: user.name, createdAt: stockEvents.createdAt })
+    .from(stockEvents).innerJoin(user, eq(stockEvents.actorId, user.id)).where(eq(stockEvents.prizeId, prizeId))
     .orderBy(asc(stockEvents.createdAt), asc(stockEvents.id));
 }
 

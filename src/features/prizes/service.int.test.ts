@@ -4,7 +4,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
 import { classes, classTeachers, prizes, stockEvents } from '../../db/schema';
 import { auth } from '../../lib/auth';
-import { archivePrize, createPrize, adjustStock, getPrizeStock, listPrizes, listStockEvents } from './service';
+import { archivePrize, createPrize, adjustStock, getPrizeStock, importPrizes, listPrizes, listStockEvents } from './service';
 import { adjustStockAction, archivePrizeAction, createPrizeAction } from './actions';
 
 let activeCookie = '';
@@ -48,7 +48,25 @@ test('creation and adjustment append actor, reason and timestamp events', async 
   ]);
   expect(events[0].reason.trim()).not.toBe('');
   expect(events.every((event) => event.createdAt instanceof Date)).toBe(true);
+  expect(events.map((event) => event.actorName)).toEqual(['Prize Teacher', 'Prize Teacher']);
   expect(await getPrizeStock(id)).toBe(1);
+});
+
+test('Excel import creates missing prizes and atomically adds stock to active matching names', async () => {
+  const existing = await createPrize(classId, 'Imported Pencil', 2, teacherId);
+  const result = await importPrizes(classId, [
+    { name: 'Imported Pencil', quantity: 3 },
+    { name: 'Imported Eraser', quantity: 5 },
+  ]);
+  expect(result).toEqual({ inserted: 1, updated: 1 });
+  expect(await getPrizeStock(existing)).toBe(5);
+  const created = (await listPrizes(classId)).find((item) => item.name === 'Imported Eraser')!;
+  expect(created.stock).toBe(5);
+  expect((await listStockEvents(existing)).at(-1)).toMatchObject({ delta: 3, reason: 'Excel 导入补充库存', actorName: 'Prize Teacher' });
+  await expect(importPrizes(classId, [
+    { name: 'Imported Pencil', quantity: 1 }, { name: 'Imported Eraser', quantity: 2147483647 },
+  ])).rejects.toThrow();
+  expect(await getPrizeStock(existing)).toBe(5);
 });
 
 test('simultaneous decrements of one unit allow exactly one ledger change', async () => {

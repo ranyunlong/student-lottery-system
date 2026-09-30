@@ -140,6 +140,24 @@ test('administrator action uploads an emblem and rejects invalid content', async
   expect(await uploadEmblemAction(form)).toMatchObject({ ok: false });
 });
 
+test.each([undefined, '', '   '])('uploads and reads an emblem with the default directory when EMBLEM_DIR is %j', async (configuredDirectory) => {
+  vi.stubEnv('EMBLEM_DIR', configuredDirectory);
+  const cwd = vi.spyOn(process, 'cwd').mockReturnValue(directory);
+  try {
+    const form = new FormData();
+    form.set('classId', classId);
+    form.set('file', new File([new Uint8Array(png)], 'mark.png', { type: 'image/png' }));
+    expect(await uploadEmblemAction(form)).toMatchObject({ ok: true });
+    expect(await readFile(join(directory, 'data', 'emblems', state.emblemPath!))).toEqual(png);
+    const response = await GET(new Request(url), context);
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(png);
+  } finally {
+    cwd.mockRestore();
+    vi.unstubAllEnvs();
+  }
+});
+
 test('administrator action rejects a non-admin before storage', async () => {
   state.adminAllowed = false;
   const form = new FormData();

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { db, pool } from '../../db/client';
-import { classes, classTeachers, lotteryRounds, prizes, sessionPrizes, sessionStudents, stockEvents, students, winningRecords } from '../../db/schema';
+import { classes, classTeachers, lotteryRounds, lotterySessions, prizes, sessionPrizes, sessionStudents, stockEvents, students, winningRecords } from '../../db/schema';
 import { auth } from '../../lib/auth';
 import { activateSession, completeSession, createSession } from './sessions';
 import { cancelRound, startRound, stopRound } from './rounds';
@@ -33,8 +33,8 @@ async function fixture(stock = 3) {
   return { classId, a, b, prize };
 }
 
-async function modeOne(f: Awaited<ReturnType<typeof fixture>>, quantity = 2, limit = 2) {
-  const id = await createSession(f.classId, { mode: 'student-prize', studentIds: [f.a.id, f.b.id], prizes: [{ prizeId: f.prize.id, quantity }], perStudentLimit: limit });
+async function modeOne(f: Awaited<ReturnType<typeof fixture>>, quantity = 3, limit = 2) {
+  const id = await createSession(f.classId, { mode: 'student-prize', studentIds: [f.a.id, f.b.id], prizes: [{ prizeId: f.prize.id, quantity: Math.max(quantity, 3) }], perStudentLimit: limit });
   await activateSession(id);
   return id;
 }
@@ -45,7 +45,7 @@ async function modeTwo(f: Awaited<ReturnType<typeof fixture>>, count = 2) {
   return id;
 }
 
-test('stopping commits one win, deduction and ledger event; repeat returns committed snapshots', async () => {
+test('stopping commits one win from reserved stock; repeat returns committed snapshots', async () => {
   const f = await fixture();
   const sessionId = await modeOne(f);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
@@ -55,9 +55,9 @@ test('stopping commits one win, deduction and ledger event; repeat returns commi
   await db.update(students).set({ name: '新姓名' }).where(eq(students.id, f.a.id));
   await db.update(prizes).set({ name: '新奖品' }).where(eq(prizes.id, f.prize.id));
   expect(await stopRound(token, teacherId)).toEqual(first);
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(2);
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
   expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toHaveLength(1);
-  expect(await db.select().from(stockEvents).where(eq(stockEvents.winningRecordId, first.winId))).toMatchObject([{ delta: -1, prizeId: f.prize.id }]);
+  expect(await db.select().from(stockEvents).where(eq(stockEvents.winningRecordId, first.winId))).toMatchObject([{ delta: 0, prizeId: f.prize.id }]);
   expect((await db.select().from(sessionStudents).where(and(eq(sessionStudents.sessionId, sessionId), eq(sessionStudents.studentId, f.a.id))))[0].usedCount).toBe(1);
   expect((await db.select().from(sessionPrizes).where(eq(sessionPrizes.sessionId, sessionId)))[0].usedCount).toBe(1);
 });
@@ -74,12 +74,12 @@ test('pending round survives a new call, blocks another start and can be cancell
   await cancelRound(token, teacherId);
   await expect(stopRound(token, teacherId)).rejects.toThrow();
   expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(3);
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
   await startRound(sessionId, teacherId, f.b.id);
 });
 
 test('concurrent stops of one token return the same win without a second stock event', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   const [first, second] = await Promise.all([stopRound(token, teacherId), stopRound(token, teacherId)]);
@@ -89,38 +89,31 @@ test('concurrent stops of one token return the same win without a second stock e
   expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
 });
 
-test('two sessions competing for one shared unit cannot oversell it', async () => {
-  const f = await fixture(1);
-  const firstSession = await modeOne(f, 1, 1);
-  const secondSession = await modeOne(f, 1, 1);
-  const firstRound = await startRound(firstSession, teacherId, f.a.id);
-  const secondRound = await startRound(secondSession, teacherId, f.b.id);
-  const outcomes = await Promise.allSettled([stopRound(firstRound.token, teacherId), stopRound(secondRound.token, teacherId)]);
-  expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
-  expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
-  expect(await db.select().from(winningRecords).where(eq(winningRecords.classId, f.classId))).toHaveLength(1);
-  const unsuccessful = outcomes[0].status === 'rejected' ? firstRound : secondRound;
-  expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.id, unsuccessful.roundId)))[0].status).toBe('active');
-  await cancelRound(unsuccessful.token, teacherId);
-});
-
-test('mode two never repeats a winner in one session, but a new session may win again', async () => {
+test('concurrent sessions cannot reserve the same available stock', async () => {
   const f = await fixture(3);
-  const sessionId = await modeTwo(f);
-  await expect(startRound(sessionId, teacherId, f.a.id)).rejects.toThrow();
-  const pending = await startRound(sessionId, teacherId);
-  expect(await startRound(sessionId, teacherId)).toEqual(pending);
-  const first = await stopRound(pending.token, teacherId);
-  const second = await stopRound((await startRound(sessionId, teacherId)).token, teacherId);
-  expect(new Set([first.studentId, second.studentId]).size).toBe(2);
+  const firstSession = await createSession(f.classId, { mode: 'student-prize', studentIds: [f.a.id], prizes: [{ prizeId: f.prize.id, quantity: 3 }], perStudentLimit: 3 });
+  const secondSession = await createSession(f.classId, { mode: 'student-prize', studentIds: [f.b.id], prizes: [{ prizeId: f.prize.id, quantity: 3 }], perStudentLimit: 3 });
+  const activations = await Promise.allSettled([activateSession(firstSession), activateSession(secondSession)]);
+  expect(activations.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+  expect(activations.filter((result) => result.status === 'rejected')).toHaveLength(1);
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
+  const active = activations[0].status === 'fulfilled' ? firstSession : secondSession;
+  await completeSession(active);
+});
+
+test('mode two may repeat winners and completes after the configured rounds', async () => {
+  const f = await fixture(3);
+  const sessionId = await createSession(f.classId, { mode: 'prize-student', studentIds: [f.a.id], prizeId: f.prize.id, roundCount: 3 });
+  await activateSession(sessionId);
+  const winners = [];
+  for (let index = 0; index < 3; index++) winners.push(await stopRound((await startRound(sessionId, teacherId)).token, teacherId));
+  expect(winners.map((win) => win.studentId)).toEqual([f.a.id, f.a.id, f.a.id]);
   await expect(startRound(sessionId, teacherId)).rejects.toThrow();
-  const other = await modeTwo(f, 1);
-  expect((await stopRound((await startRound(other, teacherId)).token, teacherId)).studentId).toBeGreaterThan(0);
+  expect((await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('completed');
   expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
 });
 
-test('mode two uses committed winners, not a stale usage counter, to exclude previous winners', async () => {
+test('mode two can draw a previously winning candidate while other candidates are archived', async () => {
   const f = await fixture(2);
   const sessionId = await modeTwo(f);
   const { token } = await startRound(sessionId, teacherId);
@@ -130,12 +123,12 @@ test('mode two uses committed winners, not a stale usage counter, to exclude pre
     studentNumberSnapshot: '001', studentNameSnapshot: '甲', prizeId: f.prize.id,
     prizeNameSnapshot: '奖品', actorId: teacherId });
   await db.update(students).set({ archived: true }).where(eq(students.id, f.b.id));
-  await expect(stopRound(token, teacherId)).rejects.toThrow('没有符合条件的学生');
-  expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, sessionId))).toHaveLength(1);
+  await expect(stopRound(token, teacherId)).resolves.toMatchObject({ studentId: f.a.id });
+  expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, sessionId))).toHaveLength(2);
 });
 
 test('stop rechecks current assignment and eligibility without consuming a pending round', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   await db.delete(classTeachers).where(and(eq(classTeachers.classId, f.classId), eq(classTeachers.teacherId, teacherId)));
@@ -144,20 +137,65 @@ test('stop rechecks current assignment and eligibility without consuming a pendi
   await db.update(students).set({ archived: true }).where(eq(students.id, f.a.id));
   await expect(stopRound(token, teacherId)).rejects.toThrow();
   await db.update(students).set({ archived: false }).where(eq(students.id, f.a.id));
-  await db.update(prizes).set({ stock: 0 }).where(eq(prizes.id, f.prize.id));
+  await db.update(prizes).set({ archived: true }).where(eq(prizes.id, f.prize.id));
   await expect(stopRound(token, teacherId)).rejects.toThrow();
   expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.id, roundId)))[0].status).toBe('active');
   expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
   await cancelRound(token, teacherId);
+  await completeSession(sessionId);
 });
 
-test('mode one rejects a student past the limit and exhausts its prize quota', async () => {
+test('mode one rejects a student past the limit while another candidate remains eligible', async () => {
   const f = await fixture(3);
-  const sessionId = await modeOne(f, 1, 1);
+  const sessionId = await modeOne(f, 2, 1);
   await stopRound((await startRound(sessionId, teacherId, f.a.id)).token, teacherId);
   await expect(startRound(sessionId, teacherId, f.a.id)).rejects.toThrow('次数上限');
-  await expect(startRound(sessionId, teacherId, f.b.id)).rejects.toThrow('没有可抽取的奖品');
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(2);
+  await expect(startRound(sessionId, teacherId, f.b.id)).resolves.toMatchObject({ token: expect.any(String) });
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
+});
+
+test('automatically completes mode one when its reserved quota is consumed', async () => {
+  const f = await fixture(3);
+  const sessionId = await createSession(f.classId, { mode: 'student-prize', studentIds: [f.a.id], prizes: [{ prizeId: f.prize.id, quantity: 2 }], perStudentLimit: 2 });
+  await activateSession(sessionId);
+  await stopRound((await startRound(sessionId, teacherId, f.a.id)).token, teacherId);
+  await stopRound((await startRound(sessionId, teacherId, f.a.id)).token, teacherId);
+  const [session] = await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId));
+  expect(session.status).toBe('completed');
+  await expect(startRound(sessionId, teacherId, f.b.id)).rejects.toThrow();
+});
+
+test('automatically completes mode one after every candidate reaches their draw limit', async () => {
+  const f = await fixture(3);
+  const sessionId = await modeOne(f, 3, 1);
+  await stopRound((await startRound(sessionId, teacherId, f.a.id)).token, teacherId);
+  expect((await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('active');
+
+  await stopRound((await startRound(sessionId, teacherId, f.b.id)).token, teacherId);
+
+  expect((await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('completed');
+});
+
+test('fixed-prize mode completes after consuming all configured reserved rounds', async () => {
+  const f = await fixture(3);
+  const sessionId = await modeTwo(f, 2);
+  const first = await startRound(sessionId, teacherId);
+  await stopRound(first.token, teacherId);
+  expect((await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('active');
+  const second = await startRound(sessionId, teacherId);
+  await stopRound(second.token, teacherId);
+  const [session] = await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId));
+  expect(session.status).toBe('completed');
+  await expect(startRound(sessionId, teacherId)).rejects.toThrow();
+});
+
+test('automatically completes fixed-prize mode at its configured round limit', async () => {
+  const f = await fixture(3);
+  const sessionId = await modeTwo(f, 1);
+  const { token } = await startRound(sessionId, teacherId);
+  await stopRound(token, teacherId);
+  const [session] = await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId));
+  expect(session.status).toBe('completed');
 });
 
 test('current authenticated actor is required even with a valid actor id', async () => {
@@ -167,11 +205,11 @@ test('current authenticated actor is required even with a valid actor id', async
   const { token } = await startRound(sessionId, teacherId, f.a.id);
   await expect(stopRound(token, randomUUID())).rejects.toThrow();
   await expect(cancelRound(token, randomUUID())).rejects.toThrow();
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(3);
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
 });
 
 test('server actions use the current login and return persisted start and stop results', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const start = new FormData(); start.set('sessionId', sessionId); start.set('selectedStudentId', String(f.a.id));
   const started = await startRoundAction(start);
@@ -184,7 +222,7 @@ test('server actions use the current login and return persisted start and stop r
 });
 
 test('start action reports its committed round when cache invalidation fails', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const data = new FormData(); data.set('sessionId', sessionId); data.set('selectedStudentId', String(f.a.id));
   vi.mocked(revalidatePath).mockImplementationOnce(() => { throw new Error('cache unavailable'); });
@@ -198,7 +236,7 @@ test('start action reports its committed round when cache invalidation fails', a
 });
 
 test('stop action returns the committed draw result when cache invalidation fails', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   const data = new FormData(); data.set('token', token);
@@ -213,7 +251,7 @@ test('stop action returns the committed draw result when cache invalidation fail
 });
 
 test('cancel action reports success after cancellation despite cache invalidation failure', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   const data = new FormData(); data.set('token', token);
@@ -226,7 +264,7 @@ test('cancel action reports success after cancellation despite cache invalidatio
 });
 
 test('action authorization failures remain failures and do not reveal a draw result', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   await db.delete(classTeachers).where(and(eq(classTeachers.classId, f.classId), eq(classTeachers.teacherId, teacherId)));
@@ -239,7 +277,7 @@ test('action authorization failures remain failures and do not reveal a draw res
 });
 
 test('ledger insert failure rolls back the win, stock, counters and round completion', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { roundId, token } = await startRound(sessionId, teacherId, f.a.id);
   const name = 'task11_fail_' + randomUUID().replaceAll('-', '');
@@ -254,8 +292,8 @@ test('ledger insert failure rolls back the win, stock, counters and round comple
     const data = new FormData(); data.set('token', token);
     expect(await stopRoundAction(data)).toEqual({ ok: false, message: '操作失败，请重试' });
     expect(await db.select().from(winningRecords).where(eq(winningRecords.roundId, roundId))).toEqual([]);
-    expect(await db.select().from(stockEvents).where(eq(stockEvents.prizeId, f.prize.id))).toEqual([]);
-    expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(1);
+    expect(await db.select().from(stockEvents).where(eq(stockEvents.prizeId, f.prize.id))).toMatchObject([{ delta: -3, winningRecordId: null }]);
+    expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
     expect((await db.select().from(sessionStudents).where(and(eq(sessionStudents.sessionId, sessionId), eq(sessionStudents.studentId, f.a.id))))[0].usedCount).toBe(0);
     expect((await db.select().from(sessionPrizes).where(and(eq(sessionPrizes.sessionId, sessionId), eq(sessionPrizes.prizeId, f.prize.id))))[0].usedCount).toBe(0);
     expect((await db.select().from(lotteryRounds).where(eq(lotteryRounds.id, roundId)))[0]).toMatchObject({ status: 'active', stoppedAt: null, stopToken: null });
@@ -266,7 +304,7 @@ test('ledger insert failure rolls back the win, stock, counters and round comple
 });
 
 test('stop waiting on class lock sees revocation committed before it enters the transaction', async () => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const { token } = await startRound(sessionId, teacherId, f.a.id);
   let release!: () => void, locked!: () => void;
@@ -291,11 +329,11 @@ test('stop waiting on class lock sees revocation committed before it enters the 
     await db.delete(classTeachers).where(and(eq(classTeachers.classId, f.classId), eq(classTeachers.teacherId, teacherId)));
   } finally { release(); await holder; }
   await expect(stopping).rejects.toThrow();
-  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(1);
+  expect((await db.select().from(prizes).where(eq(prizes.id, f.prize.id)))[0].stock).toBe(0);
 });
 
 test.each(['start', 'cancel'] as const)('%s waiting on class lock rechecks revoked assignment', async (kind) => {
-  const f = await fixture(1);
+  const f = await fixture(3);
   const sessionId = await modeOne(f, 1, 1);
   const pending = kind === 'cancel' ? await startRound(sessionId, teacherId, f.a.id) : null;
   let release!: () => void, locked!: () => void;

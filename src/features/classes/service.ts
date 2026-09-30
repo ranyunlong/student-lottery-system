@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql, type SQLWrapper } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import { db } from '../../db/client';
 import { account, user } from '../../db/auth-schema';
@@ -11,6 +11,36 @@ function required(value: string, label: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`${label}不能为空`);
   return trimmed;
+}
+
+export type PageDirection = 'next' | 'prev';
+type PageResult<T> = { items: T[]; nextCursor: string | null; previousCursor: string | null };
+type AuditRow = { id: string; actorId: string; action: string; targetUserId: string | null; classId: string | null; details: unknown; createdAt: Date };
+const teacherPageSize = 20;
+const classPageSize = 20;
+const adminAuditPageSize = 25;
+
+function encodeCursor(kind: string, key: Record<string, string>) {
+  return Buffer.from(JSON.stringify({ kind, key }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor: string | undefined, kind: string): Record<string, string> | undefined {
+  if (cursor === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { kind?: string; key?: Record<string, unknown> };
+    if (parsed.kind !== kind || !parsed.key || Object.values(parsed.key).some((value) => typeof value !== 'string')) throw new Error();
+    return parsed.key as Record<string, string>;
+  } catch {
+    throw new Error('分页游标无效');
+  }
+}
+
+function prefixPattern(value: string) {
+  return `${value.trim().toLocaleLowerCase().replace(/[!%_]/g, (character) => `!${character}`)}%`;
+}
+
+function prefixMatch(column: SQLWrapper, value: string) {
+  return sql`lower(${column}) LIKE ${prefixPattern(value)} ESCAPE '!'`;
 }
 
 async function teacherOrThrow(id: string) {
@@ -180,6 +210,77 @@ export async function updateClass(classId: string, nameInput: string): Promise<v
   });
 }
 
+export async function updateClassConfiguration(classId: string, input: {
+  name: string; primaryTeacherId: string | null; teachingTeacherIds: string[];
+}): Promise<void> {
+  const actorId = await requireAdmin();
+  const name = required(input.name, '班级名称');
+  const primaryTeacherId = input.primaryTeacherId?.trim() || null;
+  const teachingTeacherIds = input.teachingTeacherIds.map((id) => required(id, '老师编号'));
+  const requestedIds = [ ...(primaryTeacherId ? [primaryTeacherId] : []), ...teachingTeacherIds ];
+  if (new Set(requestedIds).size !== requestedIds.length) throw new Error('老师分配重复');
+
+  await db.transaction(async (tx) => {
+    const [target] = await tx.select({ name: classes.name, archived: classes.archived }).from(classes)
+      .where(eq(classes.id, classId)).for('update');
+    if (!target || target.archived) throw new Error('班级不存在或已归档');
+
+    const current = await tx.select({ teacherId: classTeachers.teacherId, role: classTeachers.role })
+      .from(classTeachers).where(eq(classTeachers.classId, classId)).for('update');
+    const currentById = new Map(current.map((item) => [item.teacherId, item.role]));
+    if (requestedIds.length) {
+      const available = await tx.select({ id: user.id, role: user.role, banned: user.banned }).from(user)
+        .where(inArray(user.id, requestedIds));
+      const availableById = new Map(available.map((teacher) => [teacher.id, teacher]));
+      for (const teacherId of requestedIds) {
+        const teacher = availableById.get(teacherId);
+        const nextRole = teacherId === primaryTeacherId ? 'primary' : 'teaching';
+        if (teacher?.role !== 'user' || (teacher.banned && currentById.get(teacherId) !== nextRole)) {
+          throw new Error('老师不存在或已停用');
+        }
+      }
+    }
+
+    const nextById = new Map<string, 'primary' | 'teaching'>([
+      ...(primaryTeacherId ? [[primaryTeacherId, 'primary'] as const] : []),
+      ...teachingTeacherIds.map((id) => [id, 'teaching'] as const),
+    ]);
+    const changed = target.name !== name || current.length !== nextById.size
+      || current.some((item) => nextById.get(item.teacherId) !== item.role);
+    if (!changed) return;
+
+    await tx.update(classes).set({ name }).where(eq(classes.id, classId));
+    for (const item of current) {
+      if (!nextById.has(item.teacherId)) {
+        await tx.delete(classTeachers).where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, item.teacherId)));
+      }
+    }
+    if (primaryTeacherId && currentById.get(primaryTeacherId) !== 'primary') {
+      await tx.update(classTeachers).set({ role: 'teaching' })
+        .where(and(eq(classTeachers.classId, classId), eq(classTeachers.role, 'primary')));
+    }
+    for (const item of current) {
+      const nextRole = nextById.get(item.teacherId);
+      if (nextRole && nextRole !== 'primary' && nextRole !== item.role) {
+        await tx.update(classTeachers).set({ role: nextRole })
+          .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, item.teacherId)));
+      }
+    }
+    if (primaryTeacherId && currentById.has(primaryTeacherId) && currentById.get(primaryTeacherId) !== 'primary') {
+      await tx.update(classTeachers).set({ role: 'primary' })
+        .where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, primaryTeacherId)));
+    }
+    for (const [teacherId, role] of nextById) {
+      if (!currentById.has(teacherId)) await tx.insert(classTeachers).values({ classId, teacherId, role });
+    }
+    await tx.insert(adminAudit).values({ actorId, classId, action: 'class.update', details: {
+      name, previousName: target.name,
+      previousAssignments: current.map(({ teacherId, role }) => ({ teacherId, role })),
+      assignments: [...nextById].map(([teacherId, role]) => ({ teacherId, role })),
+    } });
+  });
+}
+
 export async function assignTeacher(classId: string, teacherId: string): Promise<void> {
   const actorId = await requireAdmin();
   await db.transaction(async (tx) => {
@@ -187,9 +288,30 @@ export async function assignTeacher(classId: string, teacherId: string): Promise
     if (!target || target.archived) throw new Error('班级不存在或已归档');
     const [teacher] = await tx.select({ role: user.role, banned: user.banned }).from(user).where(eq(user.id, teacherId));
     if (teacher?.role !== 'user' || teacher.banned) throw new Error('老师不存在或已停用');
-    const inserted = await tx.insert(classTeachers).values({ classId, teacherId }).onConflictDoNothing().returning();
+    const inserted = await tx.insert(classTeachers).values({ classId, teacherId, role: 'teaching' }).onConflictDoNothing().returning();
     if (!inserted.length) throw new Error('老师已分配到该班级');
     await tx.insert(adminAudit).values({ actorId, classId, targetUserId: teacherId, action: 'class.teacher.assign' });
+  });
+}
+
+export async function setPrimaryTeacher(classId: string, teacherId: string): Promise<void> {
+  const actorId = await requireAdmin();
+  await db.transaction(async (tx) => {
+    const [target] = await tx.select({ archived: classes.archived }).from(classes)
+      .where(eq(classes.id, classId)).for('update');
+    if (!target || target.archived) throw new Error('班级不存在或已归档');
+    const [teacher] = await tx.select({ role: user.role, banned: user.banned }).from(user).where(eq(user.id, teacherId));
+    if (teacher?.role !== 'user' || teacher.banned) throw new Error('老师不存在或已停用');
+
+    const [current] = await tx.select({ teacherId: classTeachers.teacherId }).from(classTeachers)
+      .where(and(eq(classTeachers.classId, classId), eq(classTeachers.role, 'primary'))).limit(1);
+    if (current?.teacherId === teacherId) return;
+    await tx.update(classTeachers).set({ role: 'teaching' })
+      .where(and(eq(classTeachers.classId, classId), eq(classTeachers.role, 'primary')));
+    await tx.insert(classTeachers).values({ classId, teacherId, role: 'primary' })
+      .onConflictDoUpdate({ target: [classTeachers.classId, classTeachers.teacherId], set: { role: 'primary' } });
+    await tx.insert(adminAudit).values({ actorId, classId, targetUserId: teacherId,
+      action: 'class.teacher.primary.set', details: { previousTeacherId: current?.teacherId ?? null, teacherId } });
   });
 }
 
@@ -236,12 +358,106 @@ export async function listTeachers() {
     .from(user).where(eq(user.role, 'user')).orderBy(asc(user.name), asc(user.id));
 }
 
+export type TeacherPageItem = { id: string; name: string; email: string; banned: boolean; createdAt: Date };
+export async function listTeachersPage(input: {
+  cursor?: string; direction?: PageDirection; search?: string; status?: 'all' | 'active' | 'disabled';
+}): Promise<PageResult<TeacherPageItem>> {
+  await requireAdmin();
+  const direction = input.direction ?? 'next';
+  const key = decodeCursor(input.cursor, 'teachers');
+  if (key && (typeof key.createdAt !== 'string' || Number.isNaN(Date.parse(key.createdAt)) || typeof key.id !== 'string')) throw new Error('分页游标无效');
+  const predicates = [eq(user.role, 'user')];
+  if (input.status === 'active') predicates.push(or(eq(user.banned, false), isNull(user.banned))!);
+  if (input.status === 'disabled') predicates.push(eq(user.banned, true));
+  const search = input.search?.trim();
+  if (search) predicates.push(or(prefixMatch(user.name, search), prefixMatch(user.email, search))!);
+  if (key) predicates.push(direction === 'next'
+    ? or(sql`${user.createdAt} < ${key.createdAt}::timestamp`, and(eq(user.createdAt, sql`${key.createdAt}::timestamp`), lt(user.id, key.id)))!
+    : or(sql`${user.createdAt} > ${key.createdAt}::timestamp`, and(eq(user.createdAt, sql`${key.createdAt}::timestamp`), gt(user.id, key.id)))!);
+  let rows = await db.select({ id: user.id, name: user.name, email: user.email, banned: sql<boolean>`coalesce(${user.banned}, false)`,
+    createdAt: user.createdAt, createdAtCursor: sql<string>`${user.createdAt}::text` })
+    .from(user).where(and(...predicates)).orderBy(direction === 'prev' ? asc(user.createdAt) : desc(user.createdAt),
+      direction === 'prev' ? asc(user.id) : desc(user.id)).limit(teacherPageSize + 1);
+  const hasMore = rows.length > teacherPageSize;
+  rows = rows.slice(0, teacherPageSize);
+  if (direction === 'prev') rows.reverse();
+  const first = rows[0], last = rows.at(-1);
+  return { items: rows.map((row) => ({ id: row.id, name: row.name, email: row.email, banned: row.banned, createdAt: row.createdAt })),
+    nextCursor: last && (direction === 'prev' ? Boolean(key) : hasMore) ? encodeCursor('teachers', { createdAt: last.createdAtCursor, id: last.id }) : null,
+    previousCursor: first && (direction === 'prev' ? hasMore : Boolean(key)) ? encodeCursor('teachers', { createdAt: first.createdAtCursor, id: first.id }) : null };
+}
+
 export async function listClasses() {
   await requireAdmin();
   return db.select({ id: classes.id, name: classes.name, archived: classes.archived, emblemPath: classes.emblemPath,
     teacherId: classTeachers.teacherId, teacherName: user.name })
     .from(classes).leftJoin(classTeachers, eq(classTeachers.classId, classes.id))
     .leftJoin(user, eq(user.id, classTeachers.teacherId)).orderBy(asc(classes.name), asc(classes.id));
+}
+
+export type ClassPageItem = { id: string; name: string; archived: boolean; emblemPath: string | null; createdAt: Date; members: { id: string; name: string; role: 'primary' | 'teaching' }[] };
+export async function listClassesPage(input: {
+  cursor?: string; direction?: PageDirection; search?: string; status?: 'all' | 'active' | 'archived';
+}): Promise<PageResult<ClassPageItem>> {
+  await requireAdmin();
+  const direction = input.direction ?? 'next';
+  const key = decodeCursor(input.cursor, 'classes');
+  if (key && (typeof key.createdAt !== 'string' || Number.isNaN(Date.parse(key.createdAt)) || typeof key.id !== 'string')) throw new Error('分页游标无效');
+  const predicates = [];
+  if (input.status === 'active') predicates.push(eq(classes.archived, false));
+  if (input.status === 'archived') predicates.push(eq(classes.archived, true));
+  const search = input.search?.trim();
+  if (search) predicates.push(prefixMatch(classes.name, search));
+  if (key) predicates.push(direction === 'next'
+    ? or(sql`${classes.createdAt} < ${key.createdAt}::timestamptz`, and(eq(classes.createdAt, sql`${key.createdAt}::timestamptz`), lt(classes.id, key.id)))!
+    : or(sql`${classes.createdAt} > ${key.createdAt}::timestamptz`, and(eq(classes.createdAt, sql`${key.createdAt}::timestamptz`), gt(classes.id, key.id)))!);
+  let page = await db.select({ id: classes.id, name: classes.name, archived: classes.archived, emblemPath: classes.emblemPath,
+    createdAt: classes.createdAt, createdAtCursor: sql<string>`${classes.createdAt}::text` })
+    .from(classes).where(predicates.length ? and(...predicates) : undefined)
+    .orderBy(direction === 'prev' ? asc(classes.createdAt) : desc(classes.createdAt), direction === 'prev' ? asc(classes.id) : desc(classes.id))
+    .limit(classPageSize + 1);
+  const hasMore = page.length > classPageSize;
+  page = page.slice(0, classPageSize);
+  if (direction === 'prev') page.reverse();
+  const ids = page.map((row) => row.id);
+  const assignments = ids.length ? await db.select({ classId: classTeachers.classId, id: user.id, name: user.name, role: classTeachers.role })
+    .from(classTeachers).innerJoin(user, eq(user.id, classTeachers.teacherId)).where(inArray(classTeachers.classId, ids))
+    .orderBy(asc(user.name), asc(user.id)) : [];
+  const membersByClass = new Map<string, { id: string; name: string; role: 'primary' | 'teaching' }[]>();
+  for (const assignment of assignments) membersByClass.set(assignment.classId,
+    [...(membersByClass.get(assignment.classId) ?? []), { id: assignment.id, name: assignment.name, role: assignment.role as 'primary' | 'teaching' }]);
+  const first = page[0], last = page.at(-1);
+  return { items: page.map((row) => ({ id: row.id, name: row.name, archived: row.archived, emblemPath: row.emblemPath,
+    createdAt: row.createdAt, members: membersByClass.get(row.id) ?? [] })),
+    nextCursor: last && (direction === 'prev' ? Boolean(key) : hasMore) ? encodeCursor('classes', { createdAt: last.createdAtCursor, id: last.id }) : null,
+    previousCursor: first && (direction === 'prev' ? hasMore : Boolean(key)) ? encodeCursor('classes', { createdAt: first.createdAtCursor, id: first.id }) : null };
+}
+
+export type TeacherSearchItem = { id: string; name: string; email: string; banned: boolean };
+export async function searchAssignableTeachers(classId: string, search: string): Promise<TeacherSearchItem[]> {
+  await requireAdmin();
+  const prefix = search.trim();
+  if (!prefix) return [];
+  const [target] = await db.select({ archived: classes.archived }).from(classes).where(eq(classes.id, classId)).limit(1);
+  if (!target || target.archived) throw new Error('班级不存在或已归档');
+  return db.select({ id: user.id, name: user.name, email: user.email, banned: sql<boolean>`coalesce(${user.banned}, false)` }).from(user)
+    .where(and(eq(user.role, 'user'), or(eq(user.banned, false), isNull(user.banned)),
+      sql`(${prefixMatch(user.name, prefix)} OR ${prefixMatch(user.email, prefix)})`,
+      sql`NOT EXISTS (SELECT 1 FROM class_teachers WHERE class_id = ${classId}::uuid AND teacher_id = ${user.id})`))
+    .orderBy(asc(user.name), asc(user.id)).limit(10);
+}
+
+export async function searchPrimaryTeacherCandidates(classId: string, search: string): Promise<TeacherSearchItem[]> {
+  await requireAdmin();
+  const prefix = search.trim();
+  if (!prefix) return [];
+  const [target] = await db.select({ archived: classes.archived }).from(classes).where(eq(classes.id, classId)).limit(1);
+  if (!target || target.archived) throw new Error('班级不存在或已归档');
+  return db.select({ id: user.id, name: user.name, email: user.email,
+    banned: sql<boolean>`coalesce(${user.banned}, false)` }).from(user)
+    .where(and(eq(user.role, 'user'), or(eq(user.banned, false), isNull(user.banned)),
+      or(prefixMatch(user.name, prefix), prefixMatch(user.email, prefix))!))
+    .orderBy(asc(user.name), asc(user.id)).limit(10);
 }
 
 export async function listTeacherClasses() {
@@ -265,5 +481,56 @@ export async function listAdminAudit() {
       targetUserId: adminAudit.targetUserId, classId: adminAudit.classId, details: adminAudit.details,
       createdAt: adminAudit.createdAt })
       .from(adminAudit).orderBy(desc(adminAudit.createdAt), desc(adminAudit.id)).limit(50);
+  });
+}
+
+async function checkAdminRead(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], adminId: string) {
+  const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
+    .from(user).where(eq(user.id, adminId)).for('share');
+  if (!identity || identity.banned || identity.mustChangePassword || identity.role !== 'admin') {
+    throw new ForbiddenError('需要管理员权限');
+  }
+}
+
+function auditProjection() {
+  return { id: adminAudit.id, actorId: adminAudit.actorId, action: adminAudit.action,
+    targetUserId: adminAudit.targetUserId, classId: adminAudit.classId, details: adminAudit.details,
+    createdAt: adminAudit.createdAt };
+}
+
+export async function listAdminAuditPage(input: { cursor?: string; direction?: PageDirection }): Promise<PageResult<AuditRow>> {
+  const adminId = await requireAdmin();
+  const direction = input.direction ?? 'next';
+  return db.transaction(async (tx) => {
+    await checkAdminRead(tx, adminId);
+    let boundary: { id: string; createdAtText: string } | undefined;
+    if (input.cursor !== undefined) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.cursor)) throw new Error('审计游标无效');
+      [boundary] = await tx.select({ id: adminAudit.id, createdAtText: sql<string>`${adminAudit.createdAt}::text` })
+        .from(adminAudit).where(eq(adminAudit.id, input.cursor));
+      if (!boundary) throw new Error('审计游标无效');
+    }
+    const comparator = direction === 'next' ? lt : gt;
+    const rows = await tx.select(auditProjection()).from(adminAudit)
+      .where(boundary ? or(direction === 'next'
+        ? sql`${adminAudit.createdAt} < ${boundary.createdAtText}::timestamptz`
+        : sql`${adminAudit.createdAt} > ${boundary.createdAtText}::timestamptz`,
+        and(eq(adminAudit.createdAt, sql`${boundary.createdAtText}::timestamptz`), comparator(adminAudit.id, boundary.id))) : undefined)
+      .orderBy(direction === 'prev' ? asc(adminAudit.createdAt) : desc(adminAudit.createdAt),
+        direction === 'prev' ? asc(adminAudit.id) : desc(adminAudit.id)).limit(adminAuditPageSize + 1);
+    const hasMore = rows.length > adminAuditPageSize;
+    let items = rows.slice(0, adminAuditPageSize);
+    if (direction === 'prev') items = items.reverse();
+    const first = items[0], last = items.at(-1);
+    return { items, nextCursor: last && (direction === 'prev' ? Boolean(boundary) : hasMore) ? last.id : null,
+      previousCursor: first && (direction === 'prev' ? hasMore : Boolean(boundary)) ? first.id : null };
+  });
+}
+
+export async function listRecentAdminAudit(): Promise<AuditRow[]> {
+  const adminId = await requireAdmin();
+  return db.transaction(async (tx) => {
+    await checkAdminRead(tx, adminId);
+    return tx.select(auditProjection()).from(adminAudit).orderBy(desc(adminAudit.createdAt), desc(adminAudit.id)).limit(5);
   });
 }

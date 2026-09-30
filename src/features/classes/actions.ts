@@ -2,7 +2,7 @@
 
 import { requireAdmin } from '../../lib/access';
 import { saveUploadedEmblem } from './emblem';
-import { assignTeacher, archiveClass, createClass, createTeacher, disableTeacher, removeTeacher, resetTeacherPassword, updateTeacher, updateClass } from './service';
+import { assignTeacher, archiveClass, createClass, createTeacher, disableTeacher, removeTeacher, resetTeacherPassword, searchAssignableTeachers, searchPrimaryTeacherCandidates, setPrimaryTeacher, updateTeacher, updateClassConfiguration } from './service';
 
 export type ActionResult = { ok: boolean; message: string };
 
@@ -43,7 +43,14 @@ export async function createClassAction(data: FormData): Promise<ActionResult> {
 }
 
 export async function updateClassAction(data: FormData): Promise<ActionResult> {
-  return run(() => updateClass(field(data, 'classId'), field(data, 'name')), '班级名称已更新');
+  return run(() => updateClassConfiguration(field(data, 'classId'), {
+    name: field(data, 'name'),
+    primaryTeacherId: field(data, 'primaryTeacherId') || null,
+    teachingTeacherIds: data.getAll('teachingTeacherIds').map((value) => {
+      if (typeof value !== 'string') throw new Error('表单数据无效');
+      return value;
+    }),
+  }), '班级设置已保存');
 }
 
 export async function uploadEmblemAction(data: FormData): Promise<ActionResult> {
@@ -52,6 +59,20 @@ export async function uploadEmblemAction(data: FormData): Promise<ActionResult> 
 
 export async function assignTeacherAction(data: FormData): Promise<ActionResult> {
   return run(() => assignTeacher(field(data, 'classId'), field(data, 'teacherId')), '老师已分配');
+}
+
+export async function setPrimaryTeacherAction(data: FormData): Promise<ActionResult> {
+  return run(() => setPrimaryTeacher(field(data, 'classId'), field(data, 'teacherId')), '主要管理老师已设置');
+}
+
+export async function searchAssignableTeachersAction(classId: string, search: string) {
+  await requireAdmin();
+  return searchAssignableTeachers(classId, search);
+}
+
+export async function searchPrimaryTeacherCandidatesAction(classId: string, search: string) {
+  await requireAdmin();
+  return searchPrimaryTeacherCandidates(classId, search);
 }
 
 export async function removeTeacherAction(data: FormData): Promise<ActionResult> {

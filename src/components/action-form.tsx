@@ -2,17 +2,26 @@
 
 import { useState, useTransition, type FormEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
+import { LoaderCircle } from 'lucide-react';
 import type { ActionResult } from '../features/classes/actions';
+import { Button, type ButtonVariant } from './ui/button';
+import { DialogClose } from './ui/dialog';
+import { StatusMessage } from './ui/status-message';
+import { useDialogActionResult } from './create-dialog';
 
-export function ActionForm({ action, label, children, confirm, requestId, successHref }: {
+export function ActionForm({ action, label, children, confirm, requestId, successHref, variant = 'primary', cancelLabel, onResult }: {
   action: (data: FormData) => Promise<ActionResult>;
   label: string;
   children: ReactNode;
   confirm?: string;
   requestId?: string;
   successHref?: string;
+  variant?: ButtonVariant;
+  cancelLabel?: string;
+  onResult?: (result: ActionResult) => void;
 }) {
   const router = useRouter();
+  const reportDialogResult = useDialogActionResult();
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<ActionResult | null>(null);
 
@@ -43,14 +52,19 @@ export function ActionForm({ action, label, children, confirm, requestId, succes
       try {
         const response = await action(data);
         setResult(response);
+        onResult?.(response);
+        reportDialogResult?.(response);
         if (response.ok) {
           renewRequestId(form);
           form.reset();
           if (successHref) router.push(successHref);
-          else router.refresh();
+          router.refresh();
         }
       } catch {
-        setResult({ ok: false, message: '操作失败，请重试' });
+        const failure = { ok: false, message: '操作失败，请重试' };
+        setResult(failure);
+        onResult?.(failure);
+        reportDialogResult?.(failure);
       }
     });
   }
@@ -58,9 +72,12 @@ export function ActionForm({ action, label, children, confirm, requestId, succes
   return <form onSubmit={submit} onChange={change} className="flex flex-wrap items-end gap-3">
     {requestId && <input type="hidden" name="requestId" defaultValue={requestId} />}
     {children}
-    <button type="submit" disabled={pending} className="min-h-10 rounded bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50">
-      {pending ? '处理中…' : label}
-    </button>
-    {result && <p role={result.ok ? 'status' : 'alert'} className={`w-full text-sm ${result.ok ? 'text-teal-800' : 'text-red-700'}`}>{result.message}</p>}
+    <div className={cancelLabel ? 'flex w-full flex-wrap justify-end gap-2 border-t border-workspace-line pt-4' : 'admin-action-submit'}>
+      {cancelLabel && <DialogClose asChild><Button type="button" variant="secondary" disabled={pending}>{cancelLabel}</Button></DialogClose>}
+      <Button type="submit" variant={variant} disabled={pending} icon={pending && !cancelLabel ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : undefined}>
+        {pending ? '处理中…' : label}
+      </Button>
+    </div>
+    {result && <StatusMessage role={result.ok ? 'status' : 'alert'} tone={result.ok ? 'success' : 'error'} className="w-full">{result.message}</StatusMessage>}
   </form>;
 }

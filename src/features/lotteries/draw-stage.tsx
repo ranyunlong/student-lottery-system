@@ -1,9 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
+import { AlertTriangle, CheckCircle2, LoaderCircle, Play, RotateCcw, Square, Volume2, VolumeX } from 'lucide-react';
 import type { DrawResult } from './types';
-import { cancelRoundAction, startRoundAction, stopRoundAction } from './rounds.actions';
+import { startRoundAction, stopRoundAction } from './rounds.actions';
+import { Badge } from '../../components/ui/badge';
+import { Button } from '../../components/ui/button';
+import { Field } from '../../components/ui/field';
+import { Select } from '../../components/ui/select';
+import { StatusMessage } from '../../components/ui/status-message';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
+import styles from './onsite-screen.module.css';
 
 export type DrawStageSession = {
   sessionId?: string;
@@ -18,41 +26,89 @@ export type DrawStageSession = {
 export type DrawStageActions = {
   start(studentId?: number): Promise<{ token: string }>;
   stop(token: string): Promise<DrawResult>;
-  cancel(token: string): Promise<void>;
 };
 
-type Props = { session: DrawStageSession; actions: DrawStageActions };
+type Props = { session: DrawStageSession; actions: DrawStageActions; immersive?: boolean };
 const pendingKey = (sessionId?: string) => 'student-lottery:pending-round:' + (sessionId ?? 'current');
+const soundSettingsKey = 'student-lottery:onsite-sound';
+const soundSettingsEvent = 'student-lottery:sound-settings-change';
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重试';
 
-export function DrawStage({ session, actions }: Props) {
+function getSoundVolume() {
+  const stored = localStorage.getItem(soundSettingsKey);
+  const saved = stored === null ? NaN : Number(stored);
+  return Number.isFinite(saved) && saved >= 0 && saved <= 0.08 ? saved : 0.04;
+}
+
+function subscribeToSoundVolume(onChange: () => void) {
+  window.addEventListener('storage', onChange);
+  window.addEventListener(soundSettingsEvent, onChange);
+  return () => {
+    window.removeEventListener('storage', onChange);
+    window.removeEventListener(soundSettingsEvent, onChange);
+  };
+}
+
+export function DrawStage({ session, actions, immersive = false }: Props) {
   const router = useRouter();
   const availableCandidates = useMemo(() => session.candidates.filter((item) => item.remaining > 0 && !item.archived), [session.candidates]);
-  const fixedPrize = session.prizes[0];
+  const rollingItems = useMemo(() => session.mode === 'student-prize'
+    ? session.prizes.filter((item) => item.stock > 0 && item.quotaRemaining > 0).map((item) => item.name)
+    : availableCandidates.map((item) => item.name), [availableCandidates, session.mode, session.prizes]);
+  const fixedPrize = session.mode === 'prize-student' ? session.prizes[0] : undefined;
   const unavailableStudents = availableCandidates.length === 0 || session.drawsRemaining <= 0;
   const outOfStock = session.prizes.every((item) => item.stock <= 0 || item.quotaRemaining <= 0);
-  const [selectedStudent, setSelectedStudent] = useState(session.pendingToken && session.mode === 'student-prize' ? String(session.pendingStudentId ?? availableCandidates[0]?.id ?? '') : '');
+  const [selectedStudent, setSelectedStudent] = useState(session.pendingToken && session.mode === 'student-prize'
+    ? String(session.pendingStudentId ?? availableCandidates[0]?.id ?? '')
+    : String(availableCandidates[0]?.id ?? ''));
   const [token, setToken] = useState(session.pendingToken ?? '');
   const [running, setRunning] = useState(Boolean(session.pendingToken));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<DrawResult | null>(null);
-  const [ticker, setTicker] = useState(session.candidates[0]?.name ?? '等待开始');
+  const [tickerIndex, setTickerIndex] = useState(0);
+  const [soundMuted, setSoundMuted] = useState(false);
+  const soundVolume = useSyncExternalStore(subscribeToSoundVolume, getSoundVolume, () => 0.04);
+  const ticker = rollingItems.length ? rollingItems[tickerIndex % rollingItems.length] : '等待开始';
   const selectedCandidateAvailable = availableCandidates.some((item) => String(item.id) === selectedStudent);
   const effectiveSelectedStudent = selectedStudent && !selectedCandidateAvailable
     ? String(availableCandidates[0]?.id ?? '') : selectedStudent;
 
   useEffect(() => {
-    if (!running || session.candidates.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const interval = window.setInterval(() => setTicker((current) => {
-      const index = session.candidates.findIndex((item) => item.name === current);
-      return session.candidates[(index + 1) % session.candidates.length]?.name ?? current;
-    }), 120);
+    if (!running || rollingItems.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const interval = window.setInterval(() => setTickerIndex((current) => (current + 1) % rollingItems.length), 520);
     return () => window.clearInterval(interval);
-  }, [running, session.candidates]);
+  }, [rollingItems, running]);
+
+  function playSoundCue(frequency: number) {
+    if (!immersive || soundMuted || soundVolume <= 0 || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return;
+    const AudioContextConstructor = window.AudioContext;
+    if (!AudioContextConstructor) return;
+
+    try {
+      const context = new AudioContextConstructor();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const now = context.currentTime;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(soundVolume, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      void context.resume().catch(() => {});
+      oscillator.start(now);
+      oscillator.stop(now + 0.17);
+      oscillator.onended = () => { void context.close(); };
+    } catch {
+      // Sound is optional and must not interfere with round controls.
+    }
+  }
 
   async function start() {
     if (busy || running || session.drawsRemaining <= 0 || outOfStock || (session.mode === 'student-prize' && !effectiveSelectedStudent)) return;
+    playSoundCue(520);
     setBusy(true); setError('');
     try {
       const started = await actions.start(session.mode === 'student-prize' ? Number(effectiveSelectedStudent) : undefined);
@@ -62,6 +118,7 @@ export function DrawStage({ session, actions }: Props) {
 
   async function stop() {
     if (!token || busy) return;
+    playSoundCue(740);
     setBusy(true); setError('');
     try {
       const committed = await actions.stop(token);
@@ -70,42 +127,66 @@ export function DrawStage({ session, actions }: Props) {
     } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
   }
 
-  async function cancel() {
-    if (!token || busy) return;
-    setBusy(true); setError('');
-    try {
-      await actions.cancel(token);
-      setRunning(false); setToken(''); if (session.mode === 'student-prize' && !selectedStudent) setSelectedStudent(String(availableCandidates[0]?.id ?? '')); localStorage.removeItem(pendingKey(session.sessionId));
-    } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
-  }
-
   const canStart = !busy && !running && session.drawsRemaining > 0 && !outOfStock
     && (session.mode === 'prize-student' || availableCandidates.some((item) => String(item.id) === effectiveSelectedStudent));
-  const stageClass = running ? 'motion-safe:animate-pulse' : '';
+  const slotItems = rollingItems.length ? [
+    rollingItems[(tickerIndex + rollingItems.length - 1) % rollingItems.length],
+    ticker,
+    rollingItems[(tickerIndex + 1) % rollingItems.length],
+  ] : [];
 
-  return <section aria-labelledby="draw-stage-title" className="min-w-0 space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><h2 id="draw-stage-title" className="text-xl font-semibold">现场抽奖</h2><p className="mt-1 text-sm text-slate-600">只显示服务端确认的中奖结果。</p></div>
-      <div className="shrink-0 text-right text-sm text-slate-600"><p>剩余次数 <strong className="text-slate-900">{session.drawsRemaining}</strong></p>{fixedPrize && <p>固定奖品库存 <strong className="text-slate-900">{fixedPrize.stock}</strong></p>}</div>
-    </div>
-    <div className="border-y border-slate-200 py-6">
-      {session.mode === 'student-prize' ? <label className="flex min-w-0 flex-col gap-2 text-sm font-medium text-slate-700">本轮学生
-        <select aria-describedby="candidate-help" value={effectiveSelectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy} className="min-h-11 w-full min-w-0 rounded border border-slate-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-teal-700">
+  return <section aria-labelledby="draw-stage-title" className={immersive ? styles.stage : 'min-w-0 space-y-5'}>
+    <header className={immersive ? styles.stageHeading : 'flex flex-wrap items-center justify-between gap-3 border-b border-workspace-line pb-3'}>
+      <div className="min-w-0"><h2 id="draw-stage-title" className={immersive ? styles.stageTitle : 'text-lg font-semibold text-workspace-ink'}>现场抽奖</h2></div>
+      <div className="flex flex-wrap items-center justify-end gap-2"><Badge tone={session.drawsRemaining > 0 ? 'accent' : 'neutral'}>剩余次数 {session.drawsRemaining}</Badge>{fixedPrize && <Badge tone={fixedPrize.stock > 0 ? 'success' : 'warning'}>固定奖品库存 {fixedPrize.stock}</Badge>}{immersive && <>
+        <Button type="button" variant="quiet" size="icon" aria-label={soundMuted ? '开启音效' : '静音音效'} aria-pressed={soundMuted} title={soundMuted ? '开启音效' : '静音音效'} onClick={() => setSoundMuted((muted) => !muted)}>
+          {soundMuted ? <VolumeX aria-hidden="true" className="size-4" /> : <Volume2 aria-hidden="true" className="size-4" />}
+        </Button>
+        <label className="flex min-h-11 items-center gap-2 text-xs font-medium text-workspace-muted"><span className="sr-only">音效音量</span><input aria-label="音效音量" type="range" min="0" max="0.08" step="0.01" value={soundVolume} onChange={(event) => {
+          const volume = Number(event.target.value);
+          localStorage.setItem(soundSettingsKey, String(volume));
+          window.dispatchEvent(new Event(soundSettingsEvent));
+        }} className="w-20 accent-workspace-accent" /><span aria-hidden="true">音量</span></label>
+      </>}</div>
+    </header>
+    <div className={immersive ? styles.stageLayout : 'grid min-w-0 flex-1 gap-5 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]'}>
+      <section aria-labelledby="candidate-title" className={immersive ? styles.candidatePanel : 'min-w-0 space-y-4 rounded-md p-4 sm:p-5'}>
+        <div className="flex items-center justify-between gap-3"><h3 id="candidate-title" className="text-sm font-semibold">候选与库存</h3><span className={immersive ? styles.candidateCount : 'text-sm text-workspace-muted'}>参与人数 {session.candidates.length} 人</span></div>
+      {session.mode === 'student-prize' ? <Field label="本轮学生" className="max-w-xl">
+        <Select id="lottery-student" aria-describedby="candidate-help" value={effectiveSelectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy}>
           <option value="">请选择学生</option>{session.candidates.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={candidate.remaining <= 0 || candidate.archived}>{candidate.name}（剩余 {candidate.remaining} 次）</option>)}
-        </select>
-      </label> : <p className="min-h-11 rounded border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-medium">固定奖品：{fixedPrize?.name ?? '暂无奖品'}</p>}
-      <div id="candidate-help" className="mt-3 grid min-w-0 grid-cols-2 gap-3 text-sm text-slate-600 sm:grid-cols-3"><p>可用学生 <strong className="text-slate-900">{availableCandidates.length}</strong> 人</p>{session.prizes.map((prize) => <p key={prize.id} className="min-w-0 break-words">{prize.name}：库存 {prize.stock} · 配额 {prize.quotaRemaining}</p>)}</div>
+        </Select>
+      </Field> : <div className="min-h-11 border border-workspace-line bg-workspace-surface px-3 py-3 text-sm font-medium text-workspace-ink">固定奖品：{fixedPrize?.name ?? '暂无奖品'}</div>}
+        <div id="candidate-help" className={immersive ? styles.inventory : 'overflow-hidden border-y border-workspace-line'}>
+          <Table><TableHeader><TableRow><TableHead>奖品</TableHead><TableHead>库存</TableHead><TableHead>剩余配额</TableHead></TableRow></TableHeader><TableBody>{session.prizes.map((prize) => <TableRow key={prize.id}><TableCell className="break-words">{prize.name}</TableCell><TableCell>{prize.stock}</TableCell><TableCell>{prize.quotaRemaining}</TableCell></TableRow>)}</TableBody></Table>
+        </div>
+      </section>
+      <section aria-labelledby="phase-title" className={immersive ? styles.phasePanel : 'flex min-h-64 min-w-0 flex-col rounded-md border border-workspace-line bg-workspace-surface'}>
+        <div className={immersive ? styles.phaseHeader : 'flex min-h-12 items-center justify-between gap-3 border-b border-workspace-line px-4'}><h3 id="phase-title" className="text-sm font-semibold">{result ? '本轮结果' : running ? '正在抽取' : '准备抽取'}</h3><span role="status" className={immersive ? styles.phaseStatus : 'text-sm font-medium text-workspace-muted'}>{result ? '已完成' : running ? '抽奖进行中' : '待开始'}</span></div>
+        <div aria-label={result ? '中奖结果' : '抽取候选'} role="region" aria-live={running ? 'off' : 'polite'} aria-atomic="true" data-running={running} className={immersive ? styles.reel : 'flex min-h-44 flex-1 items-center justify-center px-4 py-8 text-center text-3xl font-semibold text-workspace-ink'}>
+          {immersive ? <div className={styles.machine} data-phase={result ? 'result' : running ? 'running' : 'idle'}>
+            <div className={styles.machineLabel}>{session.mode === 'student-prize' ? '幸运奖品' : '幸运同学'}</div>
+            <div className={styles.slotWindows}>
+              {result ? <div className={`${styles.slotWindow} ${styles.currentWindow}`} data-testid="slot-current">
+                <span className={styles.slotText}>{session.mode === 'student-prize' ? result.prizeName : result.studentName}</span>
+              </div> : running && rollingItems.length === 1 ? <div className={`${styles.slotWindow} ${styles.currentWindow}`} data-testid="slot-current"><span className={styles.slotText}>{ticker}</span></div> : running && slotItems.length ? slotItems.map((item, index) => <div key={index} className={`${styles.slotWindow} ${index === 1 ? styles.currentWindow : styles.sideWindow}`} data-testid="slot-window" aria-hidden={index !== 1}>
+                <span key={`${tickerIndex}-${index}`} className={styles.slotText} data-testid={index === 1 ? 'slot-current' : undefined}>{item}</span>
+              </div>) : <div className={`${styles.slotWindow} ${styles.currentWindow}`}><span className={styles.slotText}>等待开始</span></div>}
+            </div>
+            {result && <p className={styles.winnerLine}><CheckCircle2 aria-hidden="true" className="size-5 shrink-0" />{session.mode === 'student-prize' ? result.studentName : result.prizeName}</p>}
+          </div> : result ? <p className="flex min-w-0 flex-wrap items-center justify-center gap-2 break-words"><CheckCircle2 aria-hidden="true" className="size-6 text-workspace-success" /><span>{result.studentName}</span><span aria-hidden="true"> · </span><span>{result.prizeName}</span></p> : running ? <p className="min-w-0 break-words">{ticker}</p> : <p className="text-lg text-workspace-muted">等待开始</p>}
+        </div>
+      </section>
     </div>
-    {unavailableStudents && <p role="status" className="border-l-4 border-amber-500 bg-amber-50 px-3 py-3 text-sm text-amber-900">没有可用的候选学生或抽奖次数已用尽</p>}
-    {outOfStock && <p role="status" className="border-l-4 border-amber-500 bg-amber-50 px-3 py-3 text-sm text-amber-900">奖品库存已耗尽</p>}
-    {session.pendingToken && running && !result && <p role="status" className="text-sm text-teal-800">已恢复进行中的轮次</p>}{running && <p role="status" className="text-sm text-teal-800">抽奖进行中</p>}
-    {error && <div role="alert" className="flex min-w-0 flex-wrap items-center gap-3 border-l-4 border-red-600 bg-red-50 px-3 py-3 text-sm text-red-800"><span className="min-w-0 break-words">{error}</span>{running && <button type="button" onClick={stop} disabled={busy} className="min-h-11 shrink-0 rounded border border-red-700 px-3 py-2 font-medium focus-visible:outline-2 focus-visible:outline-red-700">重试停止</button>}</div>}
-    <div aria-live="polite" className={'flex min-h-32 min-w-0 items-center justify-center border border-slate-200 bg-white px-4 py-8 text-center text-2xl font-semibold text-slate-900 ' + stageClass}>{result ? <p className="min-w-0 break-words"><span>{result.studentName}</span><span aria-hidden="true"> · </span><span>{result.prizeName}</span></p> : running ? <p className="min-w-0 break-words">{ticker}</p> : <p className="text-lg text-slate-500">准备好后开始</p>}</div>
-    <div className="flex flex-wrap gap-3">
-      {!running && (!result || canStart) && <button type="button" onClick={result ? () => setResult(null) : start} disabled={!canStart} className="min-h-11 min-w-32 rounded bg-teal-700 px-4 py-2 font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-slate-300 focus-visible:outline-2 focus-visible:outline-teal-700">{result ? '下一轮' : '开始抽奖'}</button>}
-      {running && <><button type="button" onClick={stop} disabled={busy} className="min-h-11 min-w-32 rounded bg-teal-700 px-4 py-2 font-semibold text-white hover:bg-teal-800 disabled:cursor-wait disabled:bg-slate-300 focus-visible:outline-2 focus-visible:outline-teal-700">停止</button><button type="button" onClick={cancel} disabled={busy} className="min-h-11 min-w-32 rounded border border-slate-400 bg-white px-4 py-2 font-semibold text-slate-800 hover:bg-slate-50 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-teal-700">取消轮次</button></>}
+    {unavailableStudents && <StatusMessage role="status" tone="warning"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />没有可用的候选学生或抽奖次数已用尽</StatusMessage>}
+    {outOfStock && <StatusMessage role="status" tone="warning"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />奖品库存已耗尽</StatusMessage>}
+    {session.pendingToken && running && !result && <StatusMessage role="status" tone="info">已恢复进行中的轮次</StatusMessage>}
+    {error && <StatusMessage role="alert" tone="error" className="flex-wrap"><span className="min-w-0 flex-1 break-words">{error}</span>{running && <Button type="button" variant="secondary" size="sm" onClick={stop} disabled={busy} icon={busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <RotateCcw aria-hidden="true" className="size-4" />}>重试停止</Button>}</StatusMessage>}
+    <div tabIndex={-1} className={immersive ? styles.toolbar : 'flex flex-wrap items-center gap-2 border-t border-workspace-line pt-3'}>
+      {!running && (!result || canStart) && <Button type="button" onClick={result ? () => setResult(null) : start} disabled={!canStart} className={immersive ? styles.primaryAction : 'min-w-32'} icon={result ? <RotateCcw aria-hidden="true" className="size-4" /> : <Play aria-hidden="true" className="size-4" />}>{result ? '下一轮' : '开始抽奖'}</Button>}
+      {running && <Button type="button" onClick={stop} disabled={busy} className={immersive ? styles.primaryAction : 'min-w-32'} icon={busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <Square aria-hidden="true" className="size-4 fill-current" />}>停止</Button>}
     </div>
-    {result && <p role="status" className="border-l-4 border-teal-600 bg-teal-50 px-3 py-3 text-sm text-teal-900">中奖结果已由服务端确认并保存。</p>}
+    {result && <StatusMessage role="status" tone="success"><CheckCircle2 aria-hidden="true" className="mt-0.5 size-4 shrink-0" />中奖结果已由服务端确认并保存。</StatusMessage>}
   </section>;
 }
 
@@ -116,8 +197,7 @@ export function ProductionDrawStage({ session }: { session: DrawStageSession }) 
       const response = await startRoundAction(data); if (!response.ok) throw new Error(response.message); return response;
     },
     stop: async (token) => { const data = new FormData(); data.set('token', token); const response = await stopRoundAction(data); if (!response.ok) throw new Error(response.message); return response.result; },
-    cancel: async (token) => { const data = new FormData(); data.set('token', token); const response = await cancelRoundAction(data); if (!response.ok) throw new Error(response.message); },
   };
-  return <DrawStage session={session} actions={actions} />;
+  return <DrawStage session={session} actions={actions} immersive />;
 }
 

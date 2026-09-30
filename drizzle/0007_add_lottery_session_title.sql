@@ -1,0 +1,1 @@
+ALTER TABLE "lottery_sessions" ADD COLUMN "title" text;

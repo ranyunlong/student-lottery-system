@@ -5,7 +5,7 @@ import { requireClassAccess } from '../../lib/access';
 import { activateSession, completeSession, createSession, getSession, updateDraftSession } from './sessions';
 import type { SessionConfig } from './types';
 
-export type SessionActionResult = { ok: boolean; message: string };
+export type SessionActionResult = { ok: boolean; message: string; sessionId?: string };
 
 function field(data: FormData, name: string): string {
   const value = data.get(name);
@@ -23,10 +23,12 @@ function integer(raw: string): number {
 function parse(data: FormData): SessionConfig {
   const studentIds = data.getAll('studentIds').map((item) => integer(String(item)));
   const mode = field(data, 'mode');
-  if (mode === 'prize-student') return { mode, studentIds, prizeId: field(data, 'prizeId'), roundCount: integer(field(data, 'roundCount')) };
+  const title = data.get('title');
+  const optionalTitle = typeof title === 'string' ? title : undefined;
+  if (mode === 'prize-student') return { mode, title: optionalTitle, studentIds, prizeId: field(data, 'prizeId'), roundCount: integer(field(data, 'roundCount')) };
   if (mode === 'student-prize') {
     const prizeIds = data.getAll('prizeIds').map(String);
-    return { mode, studentIds, perStudentLimit: integer(field(data, 'perStudentLimit')),
+    return { mode, title: optionalTitle, studentIds, perStudentLimit: integer(field(data, 'perStudentLimit')),
       prizes: prizeIds.map((prizeId) => ({ prizeId, quantity: integer(field(data, 'quantity:' + prizeId)) })) };
   }
   throw new Error('抽奖模式无效');
@@ -45,11 +47,15 @@ async function run(classId: string, operation: () => Promise<void>, message: str
 
 export async function saveSessionAction(data: FormData): Promise<SessionActionResult> {
   const classId = field(data, 'classId');
-  return run(classId, async () => {
+  let savedSessionId: string | undefined;
+  const response = await run(classId, async () => {
     const sessionId = data.get('sessionId');
-    if (sessionId) await updateDraftSession(String(sessionId), parse(data));
-    else await createSession(classId, parse(data));
+    if (sessionId) {
+      savedSessionId = String(sessionId);
+      await updateDraftSession(savedSessionId, parse(data));
+    } else savedSessionId = await createSession(classId, parse(data));
   }, '草稿已保存');
+  return response.ok ? { ...response, sessionId: savedSessionId } : response;
 }
 
 async function transition(data: FormData, operation: typeof activateSession, message: string) {

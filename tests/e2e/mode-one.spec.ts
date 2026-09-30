@@ -3,18 +3,20 @@ import { test, expect, captureResponsiveEvidence, loginAsTeacher } from './fixtu
 import { db } from '../../src/db/client';
 import { lotterySessions, prizes, sessionPrizes, sessionStudents, winningRecords } from '../../src/db/schema';
 
-test('保存新建场次草稿后返回场次列表', async ({ page, teacherSession }) => {
+test('创建场次后直接进入全屏现场抽奖', async ({ page, teacherSession }) => {
   await loginAsTeacher(page, teacherSession);
   await page.goto(`/classes/${teacherSession.classId}/lotteries`);
   await page.getByRole('link', { name: '新建场次' }).click();
-  await page.getByRole('checkbox').first().check();
-  await page.getByRole('checkbox').nth(3).check();
+  await page.getByRole('button', { name: /^添加 .*同学/ }).first().click();
+  await page.getByRole('button', { name: /^添加 .*奖品/ }).first().click();
   await page.getByLabel('每人最多抽取次数').fill('2');
-  await page.getByLabel('本场数量').fill('2');
-  await page.getByRole('button', { name: '保存草稿' }).click();
-  await expect(page).toHaveURL(new RegExp(`/classes/${teacherSession.classId}/lotteries$`));
-  await expect(page.getByText('草稿', { exact: true })).toBeVisible();
-  expect(await db.select().from(lotterySessions).where(eq(lotterySessions.classId, teacherSession.classId))).toHaveLength(2);
+  await page.getByRole('spinbutton', { name: /^本场数量/ }).fill('2');
+  await page.getByRole('button', { name: '创建并进入现场抽奖' }).click();
+  await expect(page).toHaveURL(new RegExp(`/classes/${teacherSession.classId}/lotteries/[0-9a-f-]+$`));
+  await expect(page.getByRole('heading', { name: '现场抽奖' })).toBeVisible();
+  const sessions = await db.select().from(lotterySessions).where(eq(lotterySessions.classId, teacherSession.classId));
+  expect(sessions).toHaveLength(2);
+  expect(sessions.find((session) => session.id !== teacherSession.sessionId)?.status).toBe('active');
 });
 
 test('模式一在刷新后恢复选中学生并执行每人次数、奖品配额和库存限制', async ({ page, modeOneSession }) => {
@@ -54,8 +56,9 @@ test('模式一在刷新后恢复选中学生并执行每人次数、奖品配�
   await expect.poll(() => studentSelect.inputValue()).not.toBe(String(studentId));
   await page.getByRole('button', { name: '开始抽奖' }).click();
   await page.getByRole('button', { name: '停止' }).click();
-  await expect(page.getByText('中奖结果已由服务端确认并保存。')).toBeVisible();
-  await expect(page.getByText(/^剩余次数\s*0$/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: '本场中奖记录' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '本场中奖记录' }).getByRole('row')).toHaveCount(4);
+  expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, modeOneSession.sessionId)))[0].status).toBe('completed');
 
   const wins = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, modeOneSession.sessionId));
   expect(wins).toHaveLength(3);

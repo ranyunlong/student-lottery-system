@@ -38,11 +38,13 @@ test('模式二连续抽取并可兑换、纠正已持久化中奖记录', async
   const finalWins = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId));
   expect(finalWins).toHaveLength(3);
   expect(new Set(finalWins.map((win) => win.studentId)).size).toBe(finalWins.length);
-  await expect(page.getByText(/^剩余次数\s*0$/)).toBeVisible();
-  await expect(page.getByRole('button', { name: '下一轮' })).not.toBeVisible();
+  await expect(page.getByRole('heading', { name: '本场中奖记录' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '本场中奖记录' }).getByRole('row')).toHaveCount(4);
 
-  await page.getByRole('link', { name: '查看中奖记录' }).click();
-  await expect(page.getByRole('heading', { name: /中奖历史/ })).toBeVisible();
+  await page.getByRole('link', { name: '退出现场抽奖' }).click();
+  await page.getByRole('link', { name: '中奖与兑换', exact: true }).click();
+  const winningsTable = page.getByRole('table', { name: '中奖记录' });
+  await expect(winningsTable).toBeVisible();
   await captureResponsiveEvidence(page, 'winnings');
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: '标记已兑换' }).first().click();
@@ -51,14 +53,28 @@ test('模式二连续抽取并可兑换、纠正已持久化中奖记录', async
   const redeemedWins = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId));
   const redeemed = redeemedWins.filter((win) => win.redemptionStatus === 'redeemed');
   expect(redeemed).toHaveLength(1);
-  await expect(page.getByRole('listitem').filter({ hasText: redeemed[0].studentNameSnapshot })).toBeVisible();
+  await expect(winningsTable.getByRole('row').filter({ hasText: redeemed[0].studentNameSnapshot })).toBeVisible();
   expect(await db.select().from(stockEvents).where(eq(stockEvents.prizeId, teacherSession.prizeId))).toHaveLength(3);
   expect((await db.select().from(prizes).where(eq(prizes.id, teacherSession.prizeId)))[0].stock).toBe(teacherSession.initialStock - 3);
 
   await page.getByRole('button', { name: '退出登录' }).click();
   await page.waitForURL('**/login');
   await loginAsAdmin(page, adminSession);
-  await page.goto(`/admin/audit?winId=${redeemed[0].id}`);
+  await page.goto('/admin/audit?view=management');
+  const auditViews = page.getByRole('navigation', { name: '审计类型' });
+  await expect(auditViews.getByRole('link', { name: '管理操作' })).toHaveAttribute('aria-current', 'page');
+  await auditViews.getByRole('link', { name: '兑换与纠错' }).click();
+  await expect(auditViews.getByRole('link', { name: '兑换与纠错' })).toHaveAttribute('aria-current', 'page');
+  await expect(page).toHaveURL(/view=redemptions/);
+  await captureResponsiveEvidence(page, 'admin-audit-redemptions-with-record');
+  const redeemedAuditRow = page.getByRole('table', { name: '兑换与纠错记录' }).getByRole('row')
+    .filter({ hasText: redeemed[0].studentNameSnapshot })
+    .filter({ hasText: redeemed[0].prizeNameSnapshot });
+  await redeemedAuditRow.getByRole('link', { name: '定位纠错' }).click();
+  await expect(page).toHaveURL(new RegExp(`view=redemptions&winId=${redeemed[0].id}`));
+  await expect(page.getByLabel('按中奖记录 ID 定位')).toHaveValue(redeemed[0].id);
+  await expect(page.getByLabel('纠错原因')).toBeVisible();
+  await captureResponsiveEvidence(page, 'admin-audit-correction');
   await page.getByLabel('纠错原因').fill('重复点击导致误标，核对后恢复待兑换');
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: '纠正误标' }).click();
@@ -79,6 +95,12 @@ test('取消不产生结果，停止响应丢失后使用同一令牌重试不�
   expect(activeRounds).toHaveLength(0);
   expect((await db.select().from(prizes).where(eq(prizes.id, teacherSession.prizeId)))[0].stock).toBe(teacherSession.initialStock);
   await page.getByRole('button', { name: '取消轮次' }).click();
+  const cancelDialog = page.getByRole('dialog', { name: '确认取消本轮抽奖？' });
+  await expect(cancelDialog).toBeVisible();
+  await cancelDialog.getByRole('button', { name: '返回', exact: true }).click();
+  await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '取消轮次', exact: true }).click();
+  await cancelDialog.getByRole('button', { name: '确认取消轮次', exact: true }).click();
   await expect(page.getByRole('button', { name: '开始抽奖' })).toBeVisible();
   expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId))).toHaveLength(0);
   expect(await db.select().from(stockEvents).where(eq(stockEvents.prizeId, teacherSession.prizeId))).toHaveLength(0);
@@ -116,8 +138,8 @@ test('库存耗尽后不能开始下一轮', async ({ page, teacherSession }) =>
   await expect(page.getByText(/^固定奖品库存\s*1$/)).toBeVisible();
   await page.getByRole('button', { name: '开始抽奖' }).click();
   await page.getByRole('button', { name: '停止' }).click();
-  await expect(page.getByText('奖品库存已耗尽')).toBeVisible();
-  await expect(page.getByRole('button', { name: '下一轮' })).not.toBeVisible();
+  await expect(page.getByRole('heading', { name: '本场中奖记录' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '本场中奖记录' }).getByRole('row')).toHaveCount(2);
   expect((await db.select().from(prizes).where(eq(prizes.id, teacherSession.prizeId)))[0].stock).toBe(0);
   expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId))).toHaveLength(1);
 });
@@ -153,9 +175,10 @@ test('同一学生在新的真实场次重新具备候选资格', async ({ page,
   await page.getByRole('button', { name: '下一轮' }).click();
   await page.getByRole('button', { name: '开始抽奖' }).click();
   await page.getByRole('button', { name: '停止' }).click();
-  await expect(page.getByText('奖品库存已耗尽')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '本场中奖记录' })).toBeVisible();
 
-  await page.getByRole('link', { name: '查看中奖记录' }).click();
+  await page.getByRole('link', { name: '退出现场抽奖' }).click();
+  await page.getByRole('link', { name: '中奖与兑换', exact: true }).click();
   const pendingCount = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, teacherSession.sessionId));
   expect(pendingCount).toHaveLength(3);
   await page.getByRole('button', { name: '退出登录' }).click();
@@ -167,21 +190,17 @@ test('同一学生在新的真实场次重新具备候选资格', async ({ page,
   await page.goto(`/classes/${teacherSession.classId}/lotteries`);
   await page.getByRole('link', { name: '新建场次' }).click();
   await page.getByRole('link', { name: '指定奖品 · 随机学生' }).click();
-  for (let index = 0; index < teacherSession.studentIds.length; index++) await page.getByRole('checkbox').nth(index).check();
-  await page.getByLabel('固定奖品').selectOption(teacherSession.prizeId);
+  await page.getByRole('button', { name: '添加全部匹配学生' }).click();
+  await page.getByRole('button', { name: /^添加 Task15 奖品/ }).click();
   await page.getByLabel('抽取轮数').fill('1');
-  await page.getByRole('button', { name: '保存草稿' }).click();
-  await expect(page).toHaveURL(new RegExp(`/classes/${teacherSession.classId}/lotteries$`));
-  const newDraft = page.getByRole('listitem').filter({ hasText: '抽取 1 轮' });
-  await newDraft.getByRole('button', { name: '开始场次' }).click();
-  await expect(newDraft.getByText('进行中')).toBeVisible();
-  await newDraft.getByRole('link', { name: '进入现场抽奖' }).click();
+  await page.getByRole('button', { name: '创建并进入现场抽奖' }).click();
+  await expect(page).toHaveURL(new RegExp(`/classes/${teacherSession.classId}/lotteries/[^/]+$`));
   await expect(page.getByText('可用学生 3 人')).toBeVisible();
   const newSessionId = page.url().split('/').at(-1)!;
   await page.getByRole('button', { name: '开始抽奖' }).click();
   expect(await db.select().from(winningRecords).where(eq(winningRecords.sessionId, newSessionId))).toHaveLength(0);
   await page.getByRole('button', { name: '停止' }).click();
-  await expect(page.getByText('中奖结果已由服务端确认并保存。')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '本场中奖记录' })).toBeVisible();
   const newSessionWins = await db.select().from(winningRecords).where(eq(winningRecords.sessionId, newSessionId));
   expect(newSessionWins).toHaveLength(1);
   expect(teacherSession.studentIds).toContain(newSessionWins[0].studentId);

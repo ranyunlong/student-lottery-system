@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { StudentImport } from './student-import';
 import { importPastedStudentsAction, archiveStudentAction, restoreStudentAction } from '../features/students/actions';
@@ -14,8 +15,36 @@ const roster = [
   { id: 1, studentNumber: '001', name: '张三', gender: 'male' as const, archived: false },
   { id: 2, studentNumber: '002', name: '李四', gender: null, archived: true },
 ];
+function renderWithImportOpen() {
+  render(<StudentImport classId="class-one" students={roster} />);
+  fireEvent.click(screen.getByRole('button', { name: '导入学生' }));
+}
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { cleanup(); });
+
+test('opens student import in a dialog with Excel template and paste mode available', () => {
+  render(<StudentImport classId="class-one" students={roster} />);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '导入学生' }));
+  expect(screen.getByRole('dialog', { name: '导入学生' })).toBeInTheDocument();
+  const heading = within(screen.getByRole('dialog')).getByRole('heading', { name: '导入学生' });
+  expect(heading.closest('div.border-b')).toContainElement(screen.getByText('每批最多 5,000 人'));
+  expect(screen.getByText('每批最多 5,000 人').parentElement).toHaveClass('justify-end');
+  const template = screen.getByRole('link', { name: '下载 Excel 模板' });
+  expect(template).toHaveAttribute('href', '/api/classes/class-one/students/import');
+  expect(template).toHaveAttribute('download');
+  expect(screen.getByLabelText('选择 Excel 文件')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
+  expect(screen.queryByRole('link', { name: '下载 Excel 模板' })).not.toBeInTheDocument();
+});
+
+test('keeps roster table label for accessibility without the duplicate visible heading and count', () => {
+  render(<StudentImport classId="class-one" students={roster} />);
+  expect(screen.getByRole('button', { name: '导入学生' }).parentElement).toHaveClass('justify-end');
+  expect(screen.queryByRole('heading', { name: '学生名单' })).not.toBeInTheDocument();
+  expect(screen.getByRole('table', { name: '学生名单' })).toBeInTheDocument();
+  expect(screen.queryByText('2 人')).not.toBeInTheDocument();
+});
 
 test('late Excel 422 confirmation cannot restore A preview or error after selecting B', async () => {
   let finishConfirm!: (response: Response) => void;
@@ -30,7 +59,7 @@ test('late Excel 422 confirmation cannot restore A preview or error after select
     .mockReturnValueOnce(pendingB);
   vi.stubGlobal('fetch', fetchMock);
   try {
-    render(<StudentImport classId="class-one" students={roster} />);
+    renderWithImportOpen();
     const input = screen.getByLabelText('选择 Excel 文件');
     const fileA = new File(['A'], 'A.xlsx');
     const fileB = new File(['B'], 'B.xlsx');
@@ -72,7 +101,7 @@ test('late Excel success cannot report A imported in the paste tab', async () =>
     .mockReturnValueOnce(pending);
   vi.stubGlobal('fetch', fetchMock);
   try {
-    render(<StudentImport classId="class-one" students={roster} />);
+    renderWithImportOpen();
     fireEvent.change(screen.getByLabelText('选择 Excel 文件'), { target: { files: [new File(['A'], 'A.xlsx')] } });
     fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
     expect(await screen.findByText('甲')).toBeInTheDocument();
@@ -108,7 +137,7 @@ test('a stale Excel preview cannot reappear after selecting another file or conf
     .mockResolvedValueOnce(new Response(JSON.stringify({ inserted: 1, updated: 0 }), { status: 200 }));
   vi.stubGlobal('fetch', fetchMock);
   try {
-    render(<StudentImport classId="class-one" students={roster} />);
+    renderWithImportOpen();
     const input = screen.getByLabelText('选择 Excel 文件');
     const oldFile = new File(['old'], 'old.xlsx');
     const newFile = new File(['new'], 'new.xlsx');
@@ -132,7 +161,7 @@ test('a stale Excel preview cannot reappear after selecting another file or conf
 });
 
 test('paste preview shows row errors, blocks confirmation and invalidates stale preview on edit', async () => {
-  render(<StudentImport classId="class-one" students={roster} />);
+  renderWithImportOpen();
   fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
   fireEvent.change(screen.getByLabelText('粘贴学生数据'), { target: { value: '003\t王五\t男\n003\t重复\t女' } });
   fireEvent.click(screen.getByRole('button', { name: '预览名单' }));
@@ -154,9 +183,21 @@ test('paste preview shows row errors, blocks confirmation and invalidates stale 
 test('searches and filters roster and names explicit archive/restore actions', async () => {
   render(<StudentImport classId="class-one" students={roster} />);
   fireEvent.change(screen.getByLabelText('搜索名单'), { target: { value: '002' } });
+  expect(screen.getByText('张三')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '查找' }));
   expect(screen.getByText('李四')).toBeInTheDocument();
   expect(screen.queryByText('张三')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '恢复李四' })).toBeInTheDocument();
+  const rosterTable = screen.getByRole('table', { name: '学生名单' });
+  expect(rosterTable).toHaveClass('min-w-[56rem]');
+  expect(rosterTable.querySelector('thead')).not.toHaveClass('max-[1024px]:sr-only');
+  expect(rosterTable.closest('div.overflow-x-auto')).toBeInTheDocument();
+  const rosterSearch = screen.getByLabelText('搜索名单');
+  expect(rosterSearch.closest('label')?.parentElement?.parentElement).toHaveClass('rounded-md', 'border', 'bg-workspace-surface');
+  const row = within(rosterTable).getByRole('row', { name: /李四/ });
+  expect(within(row).getAllByRole('cell')).toHaveLength(5);
+  expect(within(row).getByText('002')).toBeInTheDocument();
+  expect(within(row).getByText('李四')).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('搜索名单'), { target: { value: '' } });
   expect(screen.getByRole('button', { name: '归档张三' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: '恢复李四' }));
@@ -164,8 +205,74 @@ test('searches and filters roster and names explicit archive/restore actions', a
   expect(archiveStudentAction).not.toHaveBeenCalled();
 });
 
-test('large paste preview paginates row errors without rendering every error', async () => {
+test('archives a student only after confirmation in a custom dialog', async () => {
   render(<StudentImport classId="class-one" students={roster} />);
+  const nativeConfirm = vi.spyOn(window, 'confirm');
+  fireEvent.click(screen.getByRole('button', { name: '归档张三' }));
+  const dialog = screen.getByRole('dialog', { name: '归档学生：张三' });
+  expect(within(dialog).getByText(/归档后/)).toBeInTheDocument();
+  expect(archiveStudentAction).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+  expect(screen.queryByRole('dialog', { name: '归档学生：张三' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '归档张三' }));
+  fireEvent.click(within(screen.getByRole('dialog', { name: '归档学生：张三' })).getByRole('button', { name: '确认' }));
+  await waitFor(() => expect(archiveStudentAction).toHaveBeenCalledOnce());
+  const submitted = vi.mocked(archiveStudentAction).mock.calls[0][0] as FormData;
+  expect(submitted.get('classId')).toBe('class-one');
+  expect(submitted.get('studentId')).toBe('1');
+  expect(nativeConfirm).not.toHaveBeenCalled();
+  nativeConfirm.mockRestore();
+});
+
+test('each student links to their own pending prizes by student id', () => {
+  render(<StudentImport classId="class-one" students={roster} />);
+  const table = screen.getByRole('table', { name: '学生名单' });
+  const first = within(table).getByRole('row', { name: /张三/ });
+  const second = within(table).getByRole('row', { name: /李四/ });
+  expect(within(first).getByRole('link', { name: '查看张三待兑换奖品' }))
+    .toHaveAttribute('href', '/classes/class-one/winnings?studentId=1');
+  expect(within(second).getByRole('link', { name: '查看李四待兑换奖品' }))
+    .toHaveAttribute('href', '/classes/class-one/winnings?studentId=2');
+});
+
+test('search button filters, while the separate close icon is absent', async () => {
+  const user = userEvent.setup();
+  render(<StudentImport classId="class-one" students={roster} />);
+  const status = screen.getByLabelText('状态');
+  await user.click(status);
+  await user.click(await screen.findByRole('option', { name: '已归档' }));
+  fireEvent.change(screen.getByLabelText('搜索名单'), { target: { value: '002' } });
+  fireEvent.click(screen.getByRole('button', { name: '查找' }));
+  expect(screen.getByText('李四')).toBeInTheDocument();
+  expect(screen.queryByText('张三')).not.toBeInTheDocument();
+
+  expect(screen.queryByRole('button', { name: '清空搜索' })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('搜索名单'), { target: { value: '' } });
+  expect(status).toHaveTextContent('全部');
+  expect(screen.getByLabelText('搜索名单')).toHaveValue('');
+  expect(screen.getByText('李四')).toBeInTheDocument();
+  expect(screen.getByText('张三')).toBeInTheDocument();
+});
+
+test('native search clear resets the status filter to all', async () => {
+  const user = userEvent.setup();
+  render(<StudentImport classId="class-one" students={roster} />);
+  const status = screen.getByLabelText('状态');
+  const search = screen.getByLabelText('搜索名单');
+  await user.click(status);
+  await user.click(await screen.findByRole('option', { name: '已归档' }));
+  fireEvent.change(search, { target: { value: '002' } });
+  fireEvent.click(screen.getByRole('button', { name: '查找' }));
+  expect(screen.queryByText('张三')).not.toBeInTheDocument();
+
+  fireEvent.change(search, { target: { value: '' } });
+  expect(status).toHaveTextContent('全部');
+  expect(screen.getByText('李四')).toBeInTheDocument();
+  expect(screen.getByText('张三')).toBeInTheDocument();
+});
+
+test('large paste preview paginates row errors without rendering every error', async () => {
+  renderWithImportOpen();
   fireEvent.click(screen.getByRole('tab', { name: '粘贴导入' }));
   fireEvent.change(screen.getByLabelText('粘贴学生数据'), { target: {
     value: Array.from({ length: 200 }, () => '\t未命名\t').join('\n'),

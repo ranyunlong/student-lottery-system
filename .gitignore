@@ -1,5 +1,6 @@
 node_modules/
 .next/
+.next-e2e/
 out/
 build/
 .env*
@@ -10,3 +11,4 @@ next-env.d.ts
 /test-results/
 /playwright-report/
 /playwright/.cache/
+.codegraph/

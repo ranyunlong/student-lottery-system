@@ -1,5 +1,6 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text, timestamp, boolean, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -17,7 +18,11 @@ export const user = pgTable("user", {
   banReason: text("ban_reason"),
   banExpires: timestamp("ban_expires"),
   mustChangePassword: boolean("must_change_password").default(false),
-});
+}, (table) => [
+  index("user_teacher_created_id_idx").on(table.role, table.createdAt.desc(), table.id.desc()).where(sql`${table.role} = 'user'`),
+  index("user_teacher_name_prefix_idx").on(sql`lower(${table.name}) text_pattern_ops`).where(sql`${table.role} = 'user'`),
+  index("user_teacher_email_prefix_idx").on(sql`lower(${table.email}) text_pattern_ops`).where(sql`${table.role} = 'user'`),
+]);
 
 export const session = pgTable(
   "session",

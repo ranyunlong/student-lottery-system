@@ -8,9 +8,27 @@ const MAX_ZIP_ENTRIES = 256;
 const MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 const headers = ['学号', '姓名', '性别'];
 
+export async function createStudentImportTemplate(): Promise<Uint8Array> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('学生名单', { views: [{ state: 'frozen', ySplit: 1 }] });
+  sheet.columns = [
+    { width: 24, style: { numFmt: '@' } },
+    { width: 20, style: { numFmt: '@' } },
+    { width: 12, style: { numFmt: '@' } },
+  ];
+  const header = sheet.addRow(headers);
+  header.height = 28;
+  header.eachCell((cell) => {
+    cell.font = { bold: true, size: 12, color: { argb: 'FF115E59' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFCCFBF1' } };
+    cell.alignment = { vertical: 'middle' };
+  });
+  return new Uint8Array(await workbook.xlsx.writeBuffer());
+}
+
 class ZipLimitError extends Error {}
 
-async function validateZipLimits(bytes: Uint8Array): Promise<void> {
+export async function validateZipLimits(bytes: Uint8Array): Promise<void> {
   const zip = await new Promise<ZipFile>((resolve, reject) => {
     yauzl.fromBuffer(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
       { lazyEntries: true, validateEntrySizes: true },

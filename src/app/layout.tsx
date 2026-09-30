@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: '学生抽奖系统',
+  title: '幸运游园会',
   description: '班级抽奖管理',
 };
 

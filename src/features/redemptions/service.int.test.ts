@@ -8,7 +8,7 @@ import { auth } from '../../lib/auth';
 import { activateSession, createSession } from '../lotteries/sessions';
 import { startRound, stopRound } from '../lotteries/rounds';
 import { getPrizeStock } from '../prizes/service';
-import { listAdminAudit } from '../classes/service';
+import { listAdminAudit, listAdminAuditPage } from '../classes/service';
 import { correctRedemption, findRedeemedWinForCorrection, listRedemptionAudit, listWinnings, redeemWin } from './service';
 import { correctRedemptionAction, redeemWinAction } from './actions';
 
@@ -31,13 +31,13 @@ beforeAll(async () => {
   cookie = teacherCookie;
 });
 afterAll(async () => { await pool.end(); });
-async function fixture() {
+async function fixture(studentName = '原姓名', studentNumber = '001') {
   const classId = randomUUID();
   await db.insert(classes).values({ id: classId, name: '兑换班' });
   await db.insert(classTeachers).values({ classId, teacherId });
-  const [student] = await db.insert(students).values({ classId, studentNumber: '001', name: '原姓名' }).returning();
+  const [student] = await db.insert(students).values({ classId, studentNumber, name: studentName }).returning();
   const [prize] = await db.insert(prizes).values({ classId, name: '原奖品', stock: 2 }).returning();
-  const sessionId = await createSession(classId, { mode: 'student-prize', studentIds: [student.id], prizes: [{ prizeId: prize.id, quantity: 1 }], perStudentLimit: 1 });
+  const sessionId = await createSession(classId, { mode: 'student-prize', studentIds: [student.id], prizes: [{ prizeId: prize.id, quantity: 2 }], perStudentLimit: 1 });
   await activateSession(sessionId);
   const { token } = await startRound(sessionId, teacherId, student.id);
   const { winId } = await stopRound(token, teacherId);
@@ -196,6 +196,7 @@ test('correction waiting on class lock rechecks administrator role', async () =>
 test.each([
   ['redemption_audit', () => listRedemptionAudit()],
   ['admin_audit', () => listAdminAudit()],
+  ['admin_audit', () => listAdminAuditPage({})],
 ] as const)('%s audit read cannot return data after a committed demotion', async (table, read) => {
   const f = await fixture();
   await redeemWin(f.classId, f.winId, teacherId);
@@ -237,7 +238,7 @@ test.each([
   }
 }, 15000);
 
-test('older redeemed win remains browsable and correctable beyond the first audit page', async () => {
+test('redemption audit supports 25-row next and previous pages and older wins remain correctable', async () => {
   const older = await fixture();
   await redeemWin(older.classId, older.winId, teacherId);
   const later = await fixture();
@@ -249,18 +250,26 @@ test('older redeemed win remains browsable and correctable beyond the first audi
   cookie = adminCookie;
   try {
     const first = await listRedemptionAudit();
-    expect(first.events).toHaveLength(50);
+    expect(first.events).toHaveLength(25);
     expect(first.events.some((event) => event.winningRecordId === older.winId)).toBe(false);
     expect(await findRedeemedWinForCorrection(older.winId)).toMatchObject({ id: older.winId,
       studentNumberSnapshot: '001', studentNameSnapshot: '原姓名', prizeNameSnapshot: '原奖品' });
     let cursor = first.nextCursor;
     let found = false;
-    for (let page = 0; cursor && page < 4; page++) {
-      const result = await listRedemptionAudit(cursor);
+    let previousCursor: string | null = null;
+    let priorPageIds: string[] = [];
+    let currentPageIds: string[] = [];
+    for (let page = 0; cursor && page < 6; page++) {
+      const result = await listRedemptionAudit(cursor, 'next');
+      priorPageIds = currentPageIds;
+      currentPageIds = result.events.map((event) => event.id);
+      previousCursor = result.previousCursor;
       found ||= result.events.some((event) => event.winningRecordId === older.winId);
       cursor = result.nextCursor;
     }
     expect(found).toBe(true);
+    expect(previousCursor).toBeTruthy();
+    expect((await listRedemptionAudit(previousCursor!, 'prev')).events.map((event) => event.id)).toEqual(priorPageIds);
     const before = await getPrizeStock(older.prize.id);
     await correctRedemption(older.winId, '历史记录误标', adminId);
     expect((await db.select().from(winningRecords).where(eq(winningRecords.id, older.winId)))[0]).toMatchObject({
@@ -272,4 +281,38 @@ test('older redeemed win remains browsable and correctable beyond the first audi
     await expect(listRedemptionAudit('invalid')).rejects.toThrow();
   } finally { cookie = teacherCookie; }
   await expect(findRedeemedWinForCorrection(older.winId)).rejects.toThrow('管理员');
+});
+
+test('audit filters by Shanghai day and student snapshots before cursor pagination', async () => {
+  const tag = `审计筛选${randomUUID().slice(0, 8)}`;
+  const earlier = await fixture(`${tag}%`), later = await fixture(`${tag}甲`, '778899');
+  await redeemWin(earlier.classId, earlier.winId, teacherId);
+  await redeemWin(later.classId, later.winId, teacherId);
+  await db.insert(redemptionAudit).values([
+    { classId: earlier.classId, winningRecordId: earlier.winId, actorId: teacherId,
+      previousStatus: 'pending', newStatus: 'redeemed', createdAt: new Date('2026-08-31T15:59:00Z') },
+    { classId: later.classId, winningRecordId: later.winId, actorId: teacherId,
+      previousStatus: 'pending', newStatus: 'redeemed', createdAt: new Date('2026-08-31T16:01:00Z') },
+  ]);
+  await db.insert(redemptionAudit).values(Array.from({ length: 26 }, () => ({
+    classId: later.classId, winningRecordId: later.winId, actorId: teacherId,
+    previousStatus: 'pending', newStatus: 'redeemed', createdAt: new Date('2026-08-31T16:01:00Z'),
+  })));
+  cookie = adminCookie;
+  try {
+    const filters = { date: '2026-09-01', keyword: tag };
+    const first = await listRedemptionAudit(undefined, 'next', filters);
+    expect(first.events).toHaveLength(25);
+    expect(first.events.every((event) => event.winningRecordId === later.winId)).toBe(true);
+    expect(first.nextCursor).toBeTruthy();
+    const second = await listRedemptionAudit(first.nextCursor!, 'next', filters);
+    expect(second.events).toHaveLength(2);
+    expect((await listRedemptionAudit(second.previousCursor!, 'prev', filters)).events.map((event) => event.id))
+      .toEqual(first.events.map((event) => event.id));
+    expect((await listRedemptionAudit(undefined, 'next', { date: '2026-09-01', keyword: '789' })).events).toHaveLength(0);
+    expect((await listRedemptionAudit(undefined, 'next', { date: '2026-09-01', keyword: '8899' })).events).toHaveLength(25);
+    expect((await listRedemptionAudit(undefined, 'next', { date: '2026-08-31', keyword: '%' })).events.map((event) => event.winningRecordId))
+      .toEqual([earlier.winId]);
+    expect((await listRedemptionAudit(undefined, 'next', { date: '2026-02-30', keyword: tag })).events).toHaveLength(0);
+  } finally { cookie = teacherCookie; }
 });

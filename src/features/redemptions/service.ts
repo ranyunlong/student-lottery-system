@@ -1,12 +1,14 @@
-import { and, desc, eq, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, lt, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, redemptionAudit, winningRecords } from '../../db/schema';
 import { ForbiddenError, requireAdmin, requireSession } from '../../lib/access';
+import { auditStudentPattern, shanghaiAuditDay } from './audit-filters';
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type WinningRecord = typeof winningRecords.$inferSelect & { redeemedByName: string | null };
-const auditPageSize = 50;
+const auditPageSize = 25;
+export type AuditPageDirection = 'next' | 'prev';
 
 async function adminReadAccess(tx: Transaction, actorId: string) {
   const [identity] = await tx.select({ role: user.role, banned: user.banned, mustChangePassword: user.mustChangePassword })
@@ -89,17 +91,29 @@ export async function correctRedemption(winId: string, reasonInput: string, admi
   });
 }
 
-export async function listRedemptionAudit(cursor?: string) {
+export async function listRedemptionAudit(cursor?: string, direction: AuditPageDirection = 'next',
+  filters: { date?: string; keyword?: string } = {}) {
   const adminId = await requireAdmin();
   return db.transaction(async (tx) => {
     await adminReadAccess(tx, adminId);
-    let boundary: { id: string; createdAt: Date } | undefined;
+    const day = filters.date ? shanghaiAuditDay(filters.date) : undefined;
+    if (filters.date && !day) return { events: [], nextCursor: null, previousCursor: null };
+    const pattern = auditStudentPattern(filters.keyword ?? '');
+    let boundary: { id: string; createdAtText: string } | undefined;
     if (cursor !== undefined) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursor)) throw new Error('审计游标无效');
-      [boundary] = await tx.select({ id: redemptionAudit.id, createdAt: redemptionAudit.createdAt })
+      [boundary] = await tx.select({ id: redemptionAudit.id, createdAtText: sql<string>`${redemptionAudit.createdAt}::text` })
         .from(redemptionAudit).where(eq(redemptionAudit.id, cursor));
       if (!boundary) throw new Error('审计游标无效');
     }
+    const comparator = direction === 'next' ? lt : gt;
+    const predicates: SQL[] = [];
+    if (day) predicates.push(gte(redemptionAudit.createdAt, day.from), lt(redemptionAudit.createdAt, day.to));
+    if (pattern) predicates.push(sql`(lower(${winningRecords.studentNumberSnapshot}) LIKE lower(${pattern}) ESCAPE '!' OR lower(${winningRecords.studentNameSnapshot}) LIKE lower(${pattern}) ESCAPE '!')`);
+    if (boundary) predicates.push(or(direction === 'next'
+      ? sql`${redemptionAudit.createdAt} < ${boundary.createdAtText}::timestamptz`
+      : sql`${redemptionAudit.createdAt} > ${boundary.createdAtText}::timestamptz`,
+      and(eq(redemptionAudit.createdAt, sql`${boundary.createdAtText}::timestamptz`), comparator(redemptionAudit.id, boundary.id)))!);
     const rows = await tx.select({ id: redemptionAudit.id, classId: redemptionAudit.classId,
     winningRecordId: redemptionAudit.winningRecordId, actorId: redemptionAudit.actorId,
     actorName: user.name, studentNumberSnapshot: winningRecords.studentNumberSnapshot,
@@ -109,11 +123,16 @@ export async function listRedemptionAudit(cursor?: string) {
     reason: redemptionAudit.reason, createdAt: redemptionAudit.createdAt })
     .from(redemptionAudit).innerJoin(winningRecords, eq(winningRecords.id, redemptionAudit.winningRecordId))
     .innerJoin(user, eq(user.id, redemptionAudit.actorId))
-    .where(boundary ? or(lt(redemptionAudit.createdAt, boundary.createdAt),
-      and(eq(redemptionAudit.createdAt, boundary.createdAt), lt(redemptionAudit.id, boundary.id))) : undefined)
-    .orderBy(desc(redemptionAudit.createdAt), desc(redemptionAudit.id)).limit(auditPageSize + 1);
-    const events = rows.slice(0, auditPageSize);
-    return { events, nextCursor: rows.length > auditPageSize ? events.at(-1)!.id : null };
+    .where(predicates.length ? and(...predicates) : undefined)
+    .orderBy(direction === 'prev' ? asc(redemptionAudit.createdAt) : desc(redemptionAudit.createdAt),
+      direction === 'prev' ? asc(redemptionAudit.id) : desc(redemptionAudit.id)).limit(auditPageSize + 1);
+    const hasMore = rows.length > auditPageSize;
+    let events = rows.slice(0, auditPageSize);
+    if (direction === 'prev') events = events.reverse();
+    const first = events[0], last = events.at(-1);
+    return { events,
+      nextCursor: last && (direction === 'prev' ? Boolean(boundary) : hasMore) ? last.id : null,
+      previousCursor: first && (direction === 'prev' ? hasMore : Boolean(boundary)) ? first.id : null };
   });
 }
 

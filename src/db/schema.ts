@@ -13,7 +13,11 @@ export const classes = pgTable('classes', {
   emblemPath: text('emblem_path'),
   archived: boolean('archived').notNull().default(false),
   createdAt: createdAt(),
-}, (t) => [index('classes_emblem_path_idx').on(t.emblemPath)]);
+}, (t) => [
+  index('classes_emblem_path_idx').on(t.emblemPath),
+  index('classes_created_id_idx').on(t.createdAt.desc(), t.id.desc()),
+  index('classes_name_prefix_idx').on(sql`lower(${t.name}) text_pattern_ops`),
+]);
 
 export const emblemCleanup = pgTable('emblem_cleanup', {
   storageName: text('storage_name').primaryKey(),
@@ -26,7 +30,13 @@ export const classTeachers = pgTable('class_teachers', {
   classId: uuid('class_id').notNull().references(() => classes.id),
   teacherId: text('teacher_id').notNull().references(() => user.id),
   assignedAt: timestamp('assigned_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [primaryKey({ columns: [t.classId, t.teacherId] }), index('class_teachers_teacher_idx').on(t.teacherId)]);
+  role: text('role').notNull().default('teaching'),
+}, (t) => [
+  primaryKey({ columns: [t.classId, t.teacherId] }),
+  index('class_teachers_teacher_idx').on(t.teacherId),
+  uniqueIndex('class_teachers_one_primary_per_class_idx').on(t.classId).where(sql`${t.role} = 'primary'`),
+  check('class_teachers_role_check', sql`${t.role} in ('primary', 'teaching')`),
+]);
 
 export const students = pgTable('students', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
@@ -58,6 +68,7 @@ export const prizes = pgTable('prizes', {
 export const lotterySessions = pgTable('lottery_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   classId: uuid('class_id').notNull().references(() => classes.id),
+  title: text('title'),
   mode: text('mode').notNull(),
   status: text('status').notNull().default('draft'),
   studentDrawLimit: integer('student_draw_limit'),
@@ -171,6 +182,7 @@ export const redemptionAudit = pgTable('redemption_audit', {
 }, (t) => [
   foreignKey({ columns: [t.classId, t.winningRecordId], foreignColumns: [winningRecords.classId, winningRecords.id] }),
   check('redemption_audit_status_check', sql`${t.previousStatus} in ('pending', 'redeemed') and ${t.newStatus} in ('pending', 'redeemed')`),
+  index('redemption_audit_created_id_idx').on(t.createdAt.desc(), t.id.desc()),
 ]);
 
 export const adminAudit = pgTable('admin_audit', {
@@ -181,4 +193,4 @@ export const adminAudit = pgTable('admin_audit', {
   action: text('action').notNull(),
   details: jsonb('details'),
   createdAt: createdAt(),
-});
+}, (t) => [index('admin_audit_created_id_idx').on(t.createdAt.desc(), t.id.desc())]);

@@ -5,6 +5,7 @@ import { user } from '../../db/auth-schema';
 import { classes, classTeachers, lotteryRounds, lotterySessions, prizes, sessionPrizes, sessionStudents, stockEvents, students, winningRecords } from '../../db/schema';
 import { checkClassAccess, ForbiddenError, requireSession } from '../../lib/access';
 import { RetryableRoundError, UnavailableRoundError } from '../../lib/domain-errors';
+import { releaseSessionInventory } from './sessions';
 import { pickUniformStudent, pickWeightedPrize } from './selection';
 import type { DrawResult } from './types';
 
@@ -92,6 +93,33 @@ async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
   throw new RetryableRoundError();
 }
 
+async function hasLegalNextRound(tx: Transaction, classId: string, session: typeof lotterySessions.$inferSelect) {
+  if (session.mode === 'student_prize') {
+    const [candidate] = await tx.select({ id: sessionStudents.studentId }).from(sessionStudents)
+      .innerJoin(students, and(eq(students.id, sessionStudents.studentId), eq(students.classId, classId)))
+      .where(and(eq(sessionStudents.sessionId, session.id), eq(students.archived, false),
+        sql`${sessionStudents.usedCount} < ${session.studentDrawLimit!}`)).limit(1);
+    if (!candidate) return false;
+    const options = await tx.select({ prizeId: sessionPrizes.prizeId, quantityLimit: sessionPrizes.quantityLimit,
+      usedCount: sessionPrizes.usedCount }).from(sessionPrizes)
+      .where(and(eq(sessionPrizes.sessionId, session.id), sql`${sessionPrizes.usedCount} < ${sessionPrizes.quantityLimit}`));
+    if (!options.length) return false;
+    const inventory = await lockedPrizes(tx, classId, options.map((item) => item.prizeId));
+    return options.some((item) => item.quantityLimit > item.usedCount
+      && inventory.some((prize) => prize.id === item.prizeId && !prize.archived));
+  }
+
+  const winners = await tx.select({ studentId: winningRecords.studentId }).from(winningRecords)
+    .where(eq(winningRecords.sessionId, session.id));
+  if (winners.length >= session.roundLimit!) return false;
+  const candidates = await tx.select({ id: sessionStudents.studentId, archived: students.archived })
+    .from(sessionStudents).innerJoin(students, and(eq(students.id, sessionStudents.studentId), eq(students.classId, classId)))
+    .where(eq(sessionStudents.sessionId, session.id));
+  if (!candidates.some((item) => !item.archived)) return false;
+  const [prize] = await lockedPrizes(tx, classId, [session.fixedPrizeId!]);
+  return Boolean(prize && !prize.archived);
+}
+
 export async function startRound(sessionId: string, actorId: string, selectedStudentId?: number): Promise<{ roundId: string; token: string }> {
   const current = await currentActor(actorId);
   const classId = await locateSession(sessionId);
@@ -112,17 +140,16 @@ export async function startRound(sessionId: string, actorId: string, selectedStu
       const options = await tx.select().from(sessionPrizes).where(eq(sessionPrizes.sessionId, sessionId)).orderBy(asc(sessionPrizes.prizeId));
       const inventory = await lockedPrizes(tx, classId, options.map((row) => row.prizeId));
       if (!options.some((item) => item.quantityLimit > item.usedCount
-        && inventory.some((prize) => prize.id === item.prizeId && !prize.archived && prize.stock > 0))) throw new UnavailableRoundError('没有可抽取的奖品');
+        && inventory.some((prize) => prize.id === item.prizeId && !prize.archived))) throw new UnavailableRoundError('没有可抽取的奖品');
     } else {
       if (selectedStudentId !== undefined) throw new UnavailableRoundError('此模式不能指定学生');
       const candidates = await tx.select({ id: sessionStudents.studentId, archived: students.archived })
         .from(sessionStudents).innerJoin(students, eq(students.id, sessionStudents.studentId))
         .where(eq(sessionStudents.sessionId, sessionId));
       const winners = await tx.select({ studentId: winningRecords.studentId }).from(winningRecords).where(eq(winningRecords.sessionId, sessionId));
-      const won = new Set(winners.map((item) => item.studentId));
       const [prize] = await lockedPrizes(tx, classId, [session.fixedPrizeId!]);
-      if (winners.length >= session.roundLimit! || !candidates.some((item) => !item.archived && !won.has(item.id))
-        || !prize || prize.archived || prize.stock <= 0) throw new UnavailableRoundError('抽取轮数、候选学生或库存已耗尽');
+      if (winners.length >= session.roundLimit! || !candidates.some((item) => !item.archived)
+        || !prize || prize.archived) throw new UnavailableRoundError('抽取轮数、候选学生或库存已耗尽');
     }
     const token = randomUUID();
     const [created] = await tx.insert(lotteryRounds).values({ classId, sessionId, startToken: token,
@@ -160,38 +187,39 @@ export async function stopRound(token: string, actorId: string): Promise<DrawRes
       prizeId = pickWeightedPrize(options.map((item) => {
         const prize = inventory.find((row) => row.id === item.prizeId);
         return { prizeId: item.prizeId, quotaRemaining: item.quantityLimit - item.usedCount,
-          stockRemaining: prize && !prize.archived ? prize.stock : 0 };
+          stockRemaining: prize && !prize.archived ? item.quantityLimit - item.usedCount : 0 };
       }), randomInt);
       studentId = round.studentId;
     } else {
       const [prize] = await lockedPrizes(tx, located.classId, [session.fixedPrizeId!]);
-      if (!prize || prize.archived || prize.stock <= 0) throw new UnavailableRoundError('库存不足或奖品已归档');
+      if (!prize || prize.archived) throw new UnavailableRoundError('库存不足或奖品已归档');
       const winners = await tx.select({ studentId: winningRecords.studentId }).from(winningRecords).where(eq(winningRecords.sessionId, session.id));
       if (winners.length >= session.roundLimit!) throw new UnavailableRoundError('本场轮数已用尽');
-      const won = new Set(winners.map((item) => item.studentId));
       const candidates = await tx.select({ id: sessionStudents.studentId, archived: students.archived })
         .from(sessionStudents).innerJoin(students, eq(students.id, sessionStudents.studentId))
         .where(eq(sessionStudents.sessionId, session.id)).orderBy(asc(sessionStudents.studentId));
-      studentId = pickUniformStudent(candidates.filter((item) => !item.archived && !won.has(item.id)).map((item) => item.id), randomInt);
+      studentId = pickUniformStudent(candidates.filter((item) => !item.archived).map((item) => item.id), randomInt);
       prizeId = prize.id;
     }
 
     const candidate = await studentCandidate(tx, located.classId, session.id, studentId);
     const [prize] = await tx.select().from(prizes).where(eq(prizes.id, prizeId));
-    if (!prize || prize.archived || prize.stock < 1) throw new UnavailableRoundError('库存不足或奖品已归档');
+    if (!prize || prize.archived) throw new UnavailableRoundError('库存不足或奖品已归档');
     const [record] = await tx.insert(winningRecords).values({ classId: located.classId, sessionId: session.id, roundId: round.id,
       studentId, studentNumberSnapshot: candidate.number, studentNameSnapshot: candidate.name,
       prizeId, prizeNameSnapshot: prize.name, actorId: current }).returning();
-    const [deducted] = await tx.update(prizes).set({ stock: sql`${prizes.stock} - 1` })
-      .where(and(eq(prizes.id, prizeId), sql`${prizes.stock} > 0`, eq(prizes.archived, false))).returning({ id: prizes.id });
-    if (!deducted) throw new UnavailableRoundError('库存不足或奖品已归档');
-    await tx.insert(stockEvents).values({ classId: located.classId, prizeId, delta: -1, reason: '抽奖中奖', actorId: current, winningRecordId: record.id });
+    await tx.insert(stockEvents).values({ classId: located.classId, prizeId, delta: 0, reason: '抽奖中奖（已从预留库存消耗）', actorId: current, winningRecordId: record.id });
     await tx.update(sessionStudents).set({ usedCount: sql`${sessionStudents.usedCount} + 1` })
       .where(and(eq(sessionStudents.sessionId, session.id), eq(sessionStudents.studentId, studentId)));
     if (session.mode === 'student_prize') await tx.update(sessionPrizes).set({ usedCount: sql`${sessionPrizes.usedCount} + 1` })
       .where(and(eq(sessionPrizes.sessionId, session.id), eq(sessionPrizes.prizeId, prizeId)));
     await tx.update(lotteryRounds).set({ status: 'completed', stopToken: token, stoppedBy: current, stoppedAt: new Date() })
       .where(eq(lotteryRounds.id, round.id));
+    if (!await hasLegalNextRound(tx, located.classId, session)) {
+      await tx.update(lotterySessions).set({ status: 'completed', completedAt: new Date() })
+        .where(eq(lotterySessions.id, session.id));
+      await releaseSessionInventory(tx, session, current);
+    }
     return result(record);
   }));
 }

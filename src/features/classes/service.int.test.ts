@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db, pool } from '../../db/client';
 import { account, user } from '../../db/auth-schema';
-import { adminAudit, classes, lotteryRounds, lotterySessions, prizes, stockEvents, students, winningRecords } from '../../db/schema';
+import { adminAudit, classes, classTeachers, lotteryRounds, lotterySessions, prizes, stockEvents, students, winningRecords } from '../../db/schema';
 import { auth } from '../../lib/auth';
 import { requireClassAccess } from '../../lib/access';
-import { createTeacher, createClass, assignTeacher, removeTeacher, listClassTeacherIds, archiveClass, updateClass, updateTeacher, disableTeacher, resetTeacherPassword, listTeachers, listClasses, listTeacherClasses, listAdminAudit } from './service';
-import { createTeacherAction, createClassAction, assignTeacherAction, removeTeacherAction, archiveClassAction, updateClassAction, updateTeacherAction, disableTeacherAction, resetTeacherPasswordAction } from './actions';
+import { createTeacher, createClass, assignTeacher, removeTeacher, listClassTeacherIds, archiveClass, updateClass, updateClassConfiguration, updateTeacher, disableTeacher, resetTeacherPassword, listTeachers, listClasses, listTeacherClasses, listAdminAudit, listTeachersPage, listClassesPage, listAdminAuditPage, listRecentAdminAudit, searchAssignableTeachers, searchPrimaryTeacherCandidates, setPrimaryTeacher } from './service';
+import { createTeacherAction, createClassAction, assignTeacherAction, removeTeacherAction, archiveClassAction, updateClassAction, updateTeacherAction, disableTeacherAction, resetTeacherPasswordAction, searchPrimaryTeacherCandidatesAction, setPrimaryTeacherAction } from './actions';
 import { activateSession, completeSession, createSession } from '../lotteries/sessions';
 import { startRound, stopRound } from '../lotteries/rounds';
 
@@ -163,6 +163,72 @@ test('updates, disables and resets teacher while retaining class history and aud
   expect(events.map((e) => e.action)).toEqual(['teacher.create', 'class.teacher.assign', 'teacher.update', 'teacher.password.reset', 'teacher.disable']);
   expect(events.every((e) => e.actorId === adminId && e.createdAt instanceof Date)).toBe(true);
   expect(JSON.stringify(events)).not.toContain('ResetPassword123!');
+});
+
+test('saves class details and the complete primary/teaching roster atomically', async () => {
+  const classId = await createClass(`Atomic class ${randomUUID()}`);
+  const ids = await Promise.all(['Atomic Primary', 'Atomic Teaching One', 'Atomic Teaching Two'].map((name) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  await assignTeacher(classId, ids[0]);
+  await setPrimaryTeacher(classId, ids[0]);
+  await assignTeacher(classId, ids[1]);
+
+  await updateClassConfiguration(classId, { name: 'Atomic class renamed', primaryTeacherId: ids[1], teachingTeacherIds: [ids[0], ids[2]] });
+
+  expect((await db.select({ name: classes.name }).from(classes).where(eq(classes.id, classId)))[0].name).toBe('Atomic class renamed');
+  expect(await db.select({ teacherId: classTeachers.teacherId, role: classTeachers.role }).from(classTeachers)
+    .where(eq(classTeachers.classId, classId)).orderBy(asc(classTeachers.teacherId))).toEqual([
+    { teacherId: ids[0], role: 'teaching' },
+    { teacherId: ids[1], role: 'primary' },
+    { teacherId: ids[2], role: 'teaching' },
+  ].sort((a, b) => a.teacherId.localeCompare(b.teacherId)));
+  const changes = await db.select().from(adminAudit).where(and(eq(adminAudit.classId, classId), eq(adminAudit.action, 'class.update')));
+  expect(changes).toHaveLength(1);
+});
+
+test('promotes an existing teaching member only after demoting the previous primary', async () => {
+  const classId = await createClass(`Primary configuration order ${randomUUID()}`);
+  const [previousPrimaryId, existingTeachingId] = await Promise.all(['Previous primary', 'Existing teaching'].map((name) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  await assignTeacher(classId, previousPrimaryId);
+  await setPrimaryTeacher(classId, previousPrimaryId);
+  await assignTeacher(classId, existingTeachingId);
+
+  await expect(updateClassConfiguration(classId, {
+    name: 'Primary configuration order updated',
+    primaryTeacherId: existingTeachingId,
+    teachingTeacherIds: [previousPrimaryId],
+  })).resolves.toBeUndefined();
+
+  const assignments = await db.select({ teacherId: classTeachers.teacherId, role: classTeachers.role }).from(classTeachers)
+    .where(eq(classTeachers.classId, classId));
+  expect(assignments).toHaveLength(2);
+  expect(Object.fromEntries(assignments.map(({ teacherId, role }) => [teacherId, role]))).toEqual({
+    [previousPrimaryId]: 'teaching',
+    [existingTeachingId]: 'primary',
+  });
+  expect(await db.select({ action: adminAudit.action }).from(adminAudit)
+    .where(and(eq(adminAudit.classId, classId), eq(adminAudit.action, 'class.update')))).toHaveLength(1);
+});
+
+test('rolls back class details and teacher changes when the configuration audit cannot be written', async () => {
+  const classId = await createClass(`Atomic rollback ${randomUUID()}`);
+  await assignTeacher(classId, teacherId);
+  const candidateId = (await auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: 'Rollback candidate', password: 'TeacherPassword123!', role: 'user' },
+  })).user.id;
+  await rejectAuditAction('class.update');
+  try {
+    await expect(updateClassConfiguration(classId, {
+      name: 'Must not persist', primaryTeacherId: candidateId, teachingTeacherIds: [],
+    })).rejects.toThrow();
+  } finally { await allowAuditAction('class.update'); }
+
+  expect((await db.select({ name: classes.name }).from(classes).where(eq(classes.id, classId)))[0].name).toMatch(/^Atomic rollback /);
+  expect(await db.select({ teacherId: classTeachers.teacherId, role: classTeachers.role }).from(classTeachers)
+    .where(eq(classTeachers.classId, classId))).toEqual([{ teacherId, role: 'teaching' }]);
 });
 
 test('audit insert failure prevents teacher creation and retry can use the same email', async () => {
@@ -378,9 +444,10 @@ test('teacher cannot call any administrator service or action including reads', 
       () => createClass('Forbidden'), () => assignTeacher(randomUUID(), teacherId),
       () => removeTeacher(randomUUID(), teacherId), () => listClassTeacherIds(randomUUID()),
       () => archiveClass(randomUUID()), () => updateTeacher(teacherId, { name: 'Changed', email: teacherEmail }),
-      () => updateClass(randomUUID(), 'Changed'), () => listAdminAudit(),
+      () => updateClass(randomUUID(), 'Changed'), () => listAdminAudit(), () => listAdminAuditPage({}), () => listRecentAdminAudit(),
       () => disableTeacher(teacherId), () => resetTeacherPassword(teacherId, 'ResetPassword123!'),
-      () => listTeachers(), () => listClasses(),
+      () => listTeachers(), () => listClasses(), () => listTeachersPage({}), () => listClassesPage({}),
+      () => searchAssignableTeachers(randomUUID(), 'prefix'),
       () => createTeacherAction(data({ name: 'X', email: `${randomUUID()}@example.test`, temporaryPassword: 'Password123!' })),
       () => createClassAction(data({ name: 'Forbidden' })),
       () => assignTeacherAction(data({ classId: randomUUID(), teacherId })),
@@ -549,4 +616,182 @@ test('administrator form action reports success or validation error with real da
   const invalid = new FormData();
   invalid.set('name', '   ');
   expect(await createClassAction(invalid)).toMatchObject({ ok: false });
+});
+
+test('admin pages support stable next/previous navigation, prefix filters and only load members for returned classes', async () => {
+  const marker = randomUUID().slice(0, 8);
+  const teacherIds = await Promise.all(Array.from({ length: 22 }, (_, index) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: `PageTeacher-${marker}-${String(index).padStart(2, '0')}`, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  const sharedCreatedAt = new Date('2026-01-01T00:00:00.000Z');
+  await db.update(user).set({ createdAt: sharedCreatedAt }).where(inArray(user.id, teacherIds));
+  await db.update(user).set({ banned: true }).where(eq(user.id, teacherIds[0]));
+  const first = await listTeachersPage({ search: `PageTeacher-${marker}`, status: 'active' });
+  expect(first.items).toHaveLength(20);
+  expect(first.items.some((row) => row.id === teacherIds[0])).toBe(false);
+  expect(first.items.every((row) => row.createdAt.getTime() === sharedCreatedAt.getTime())).toBe(true);
+  const expectedTeacherOrder = await db.select({ id: user.id }).from(user)
+    .where(and(inArray(user.id, teacherIds), eq(user.role, 'user'), eq(user.banned, false)))
+    .orderBy(desc(user.createdAt), desc(user.id));
+  expect(first.nextCursor).toBeTruthy();
+  expect(first.previousCursor).toBeNull();
+  const last = await listTeachersPage({ cursor: first.nextCursor!, direction: 'next', search: `PageTeacher-${marker}`, status: 'active' });
+  expect(last.items).toHaveLength(1);
+  expect(last.previousCursor).toBeTruthy();
+  expect([...first.items, ...last.items].map((row) => row.id)).toEqual(expectedTeacherOrder.map((row) => row.id));
+  const back = await listTeachersPage({ cursor: last.previousCursor!, direction: 'prev', search: `PageTeacher-${marker}`, status: 'active' });
+  expect(back.items.map((row) => row.id)).toEqual(first.items.map((row) => row.id));
+
+  const classIds = await Promise.all(Array.from({ length: 21 }, (_, index) => createClass(`PageClass-${marker}-${String(index).padStart(2, '0')}`)));
+  await db.update(classes).set({ createdAt: sharedCreatedAt }).where(inArray(classes.id, classIds));
+  await assignTeacher(classIds[0], teacherIds[1]);
+  const classPage = await listClassesPage({ search: `PageClass-${marker}` });
+  expect(classPage.items).toHaveLength(20);
+  expect(classPage.items.every((row) => row.createdAt.getTime() === sharedCreatedAt.getTime())).toBe(true);
+  const expectedClassOrder = await db.select({ id: classes.id }).from(classes).where(inArray(classes.id, classIds))
+    .orderBy(desc(classes.createdAt), desc(classes.id));
+  const lastClass = await listClassesPage({ cursor: classPage.nextCursor!, direction: 'next', search: `PageClass-${marker}` });
+  expect(lastClass.items).toHaveLength(1);
+  expect([...classPage.items, ...lastClass.items].map((row) => row.id)).toEqual(expectedClassOrder.map((row) => row.id));
+  expect([...classPage.items, ...lastClass.items].find((row) => row.id === classIds[0])?.members)
+    .toMatchObject([{ id: teacherIds[1], name: `PageTeacher-${marker}-01` }]);
+  const backClass = await listClassesPage({ cursor: lastClass.previousCursor!, direction: 'prev', search: `PageClass-${marker}` });
+  expect(backClass.items.map((row) => row.id)).toEqual(classPage.items.map((row) => row.id));
+  await archiveClass(classIds[0]);
+  expect((await listClassesPage({ search: `PageClass-${marker}`, status: 'archived' })).items.map((row) => row.id)).toEqual([classIds[0]]);
+  const auditPage = await listAdminAuditPage({});
+  expect(auditPage.items).toHaveLength(25);
+  expect(auditPage.previousCursor).toBeNull();
+  expect(auditPage.nextCursor).toBeTruthy();
+  const olderAudit = await listAdminAuditPage({ cursor: auditPage.nextCursor!, direction: 'next' });
+  expect(olderAudit.previousCursor).toBeTruthy();
+  const newerAudit = await listAdminAuditPage({ cursor: olderAudit.previousCursor!, direction: 'prev' });
+  expect(newerAudit.items.map((row) => row.id)).toEqual(auditPage.items.map((row) => row.id));
+  expect((await listRecentAdminAudit())).toHaveLength(5);
+  await expect(listTeachersPage({ cursor: 'malformed' })).rejects.toThrow('游标');
+  await expect(listClassesPage({ cursor: 'malformed' })).rejects.toThrow('游标');
+  await expect(listAdminAuditPage({ cursor: 'malformed' })).rejects.toThrow('游标');
+});
+
+test('assignable teacher prefix search excludes disabled accounts and is capped at ten', async () => {
+  const marker = randomUUID().slice(0, 8);
+  const classId = await createClass('Assignable search');
+  const matches = await Promise.all(Array.from({ length: 12 }, (_, index) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: `Lookup-${marker}-${String(index).padStart(2, '0')}`, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  await db.update(user).set({ banned: true }).where(eq(user.id, matches[0]));
+  await assignTeacher(classId, matches[1]);
+  const result = await searchAssignableTeachers(classId, `Lookup-${marker}`);
+  expect(result).toHaveLength(10);
+  expect(result.some((teacher) => teacher.id === matches[0])).toBe(false);
+  expect(result.some((teacher) => teacher.id === matches[1])).toBe(false);
+  expect(result.every((teacher) => teacher.name.startsWith(`Lookup-${marker}`))).toBe(true);
+});
+
+test('teacher prefix search treats percent and underscore as literal characters', async () => {
+  const marker = randomUUID().slice(0, 8);
+  const names = [`Symbol-${marker}%Target`, `Symbol-${marker}XTarget`, `Symbol-${marker}_Target`, `Symbol-${marker}ATarget`];
+  const ids = await Promise.all(names.map((name) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  expect((await listTeachersPage({ search: `Symbol-${marker}%` })).items.map((row) => row.id)).toEqual([ids[0]]);
+  expect((await listTeachersPage({ search: `Symbol-${marker}_` })).items.map((row) => row.id)).toEqual([ids[2]]);
+});
+
+test('teacher assignments default to teaching and paginated class members expose the role', async () => {
+  const classId = await createClass(`Role presentation ${randomUUID()}`);
+  await assignTeacher(classId, teacherId);
+
+  const membership = await pool.query<{ role: string }>(
+    'SELECT role FROM class_teachers WHERE class_id = $1 AND teacher_id = $2', [classId, teacherId],
+  );
+  expect(membership.rows).toEqual([{ role: 'teaching' }]);
+  expect((await listClassesPage({ search: 'Role presentation' })).items.find((item) => item.id === classId)?.members)
+    .toEqual([{ id: teacherId, name: 'Teacher', role: 'teaching' }]);
+});
+
+test('setting a primary teacher promotes membership, demotes the previous primary, and audits the replacement', async () => {
+  const classId = await createClass(`Primary replacement ${randomUUID()}`);
+  const firstTeacher = (await auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: 'Primary One', password: 'TeacherPassword123!', role: 'user' },
+  })).user.id;
+  const nextTeacher = (await auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: 'Primary Two', password: 'TeacherPassword123!', role: 'user' },
+  })).user.id;
+
+  await assignTeacher(classId, firstTeacher);
+  await setPrimaryTeacher(classId, firstTeacher);
+  await setPrimaryTeacher(classId, nextTeacher);
+
+  const roles = await db.select({ teacherId: classTeachers.teacherId, role: classTeachers.role })
+    .from(classTeachers).where(eq(classTeachers.classId, classId)).orderBy(asc(classTeachers.teacherId));
+  expect(roles).toEqual([
+    { teacherId: firstTeacher, role: 'teaching' },
+    { teacherId: nextTeacher, role: 'primary' },
+  ].sort((a, b) => a.teacherId.localeCompare(b.teacherId)));
+  const event = (await db.select().from(adminAudit)
+    .where(and(eq(adminAudit.classId, classId), eq(adminAudit.action, 'class.teacher.primary.set'))))
+    .at(-1);
+  expect(event).toMatchObject({ actorId: adminId, targetUserId: nextTeacher, classId });
+  expect((await listClassesPage({ search: 'Primary replacement' })).items.find((item) => item.id === classId)?.members)
+    .toEqual([
+      { id: firstTeacher, name: 'Primary One', role: 'teaching' },
+      { id: nextTeacher, name: 'Primary Two', role: 'primary' },
+    ]);
+});
+
+test('concurrent primary inserts are constrained to one row per class', async () => {
+  const classId = await createClass(`Primary uniqueness ${randomUUID()}`);
+  const candidateIds = await Promise.all(['Primary Race One', 'Primary Race Two'].map((name) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+
+  const inserts = await Promise.allSettled(candidateIds.map((teacherId) => pool.query(
+    "INSERT INTO class_teachers (class_id, teacher_id, role) VALUES ($1, $2, 'primary')", [classId, teacherId],
+  )));
+
+  expect(inserts.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+  expect(inserts.filter((result) => result.status === 'rejected')).toHaveLength(1);
+  expect(await db.select({ teacherId: classTeachers.teacherId }).from(classTeachers)
+    .where(and(eq(classTeachers.classId, classId), eq(classTeachers.role, 'primary')))).toHaveLength(1);
+});
+
+test('primary candidates are enabled, bounded, and include existing teaching members', async () => {
+  const marker = randomUUID().slice(0, 8);
+  const classId = await createClass(`Primary candidates ${marker}`);
+  const ids = await Promise.all(Array.from({ length: 12 }, (_, index) => auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: `PrimaryLookup-${marker}-${String(index).padStart(2, '0')}`, password: 'TeacherPassword123!', role: 'user' },
+  }).then((result) => result.user.id)));
+  await db.update(user).set({ banned: true }).where(eq(user.id, ids[0]));
+  await assignTeacher(classId, ids[1]);
+
+  const candidates = await searchPrimaryTeacherCandidates(classId, `PrimaryLookup-${marker}`);
+  expect(candidates).toHaveLength(10);
+  expect(candidates.some((candidate) => candidate.id === ids[0])).toBe(false);
+  expect(candidates.some((candidate) => candidate.id === ids[1])).toBe(true);
+  expect(await searchPrimaryTeacherCandidatesAction(classId, `PrimaryLookup-${marker}`)).toEqual(candidates);
+  expect(await searchPrimaryTeacherCandidates(classId, '   ')).toEqual([]);
+});
+
+test('primary assignment rejects disabled teachers and teacher accounts cannot use primary APIs', async () => {
+  const classId = await createClass(`Primary rejection ${randomUUID()}`);
+  const disabledTeacher = (await auth.api.createUser({
+    body: { email: `${randomUUID()}@example.test`, name: 'Disabled Primary', password: 'TeacherPassword123!', role: 'user' },
+  })).user.id;
+  await db.update(user).set({ banned: true }).where(eq(user.id, disabledTeacher));
+  await expect(setPrimaryTeacher(classId, disabledTeacher)).rejects.toThrow('老师不存在或已停用');
+
+  activeCookie = teacherCookie;
+  try {
+    await expect(setPrimaryTeacher(classId, teacherId)).rejects.toThrow('需要管理员权限');
+    await expect(searchPrimaryTeacherCandidates(classId, 'Teacher')).rejects.toThrow('需要管理员权限');
+    await expect(setPrimaryTeacherAction(formData({ classId, teacherId }))).rejects.toThrow('需要管理员权限');
+    await expect(searchPrimaryTeacherCandidatesAction(classId, 'Teacher')).rejects.toThrow('需要管理员权限');
+  } finally { activeCookie = adminCookie; }
+});
+
+test('primary action returns success for an administrator', async () => {
+  const classId = await createClass(`Primary action ${randomUUID()}`);
+  expect(await setPrimaryTeacherAction(formData({ classId, teacherId })))
+    .toEqual({ ok: true, message: '主要管理老师已设置' });
 });

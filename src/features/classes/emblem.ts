@@ -26,8 +26,7 @@ export function validateEmblem(bytes: Uint8Array): EmblemFormat {
 }
 
 function emblemDirectory(): string {
-  if (!process.env.EMBLEM_DIR) throw new Error('EMBLEM_DIR is required');
-  return resolve(process.env.EMBLEM_DIR);
+  return resolve(process.env.EMBLEM_DIR?.trim() || 'data/emblems');
 }
 
 export async function saveEmblem(classId: string, bytes: Uint8Array): Promise<string> {

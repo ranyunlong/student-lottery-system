@@ -37,17 +37,64 @@ beforeAll(async () => {
 });
 afterAll(async () => { await pool.end(); });
 
-test('mode two bounds rounds by candidates and shared stock', async () => {
-  await expect(createSession(classId, { mode: 'prize-student', studentIds: [a, b], prizeId, roundCount: 3 })).rejects.toThrow('抽取轮数超过候选人数');
+test('lists newer sessions first and breaks matching timestamps by descending id', async () => {
+  const config = { mode: 'student-prize' as const, studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 };
+  const ids = await Promise.all([createSession(classId, config), createSession(classId, config), createSession(classId, config)]);
+  const older = new Date('2026-01-01T00:00:00.000Z');
+  const newer = new Date('2026-01-02T00:00:00.000Z');
+  await db.update(lotterySessions).set({ createdAt: older }).where(eq(lotterySessions.id, ids[0]));
+  await db.update(lotterySessions).set({ createdAt: newer }).where(eq(lotterySessions.id, ids[1]));
+  await db.update(lotterySessions).set({ createdAt: newer }).where(eq(lotterySessions.id, ids[2]));
+
+  const expected = [...ids].sort((left, right) => {
+    if (left === ids[0]) return 1;
+    if (right === ids[0]) return -1;
+    return right.localeCompare(left);
+  });
+  expect((await listSessions(classId)).filter((session) => ids.includes(session.id)).map((session) => session.id)).toEqual(expected);
+});
+
+test('mode two validates configured rounds against shared stock', async () => {
+  await db.update(prizes).set({ stock: 4 }).where(eq(prizes.id, prizeId));
+  await expect(createSession(classId, { mode: 'prize-student', studentIds: [a, b], prizeId, roundCount: 4 })).resolves.toEqual(expect.any(String));
   await db.update(prizes).set({ stock: 1 }).where(eq(prizes.id, prizeId));
   await expect(createSession(classId, { mode: 'prize-student', studentIds: [a, b], prizeId, roundCount: 2 })).rejects.toThrow('库存不足');
   await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
 });
 
+test('student-prize total configured quantity must be strictly greater than candidate count', async () => {
+  await expect(createSession(classId, { mode: 'student-prize', studentIds: [a, b], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 2 })).rejects.toThrow('总数量必须大于候选学生数');
+  await expect(createSession(classId, { mode: 'student-prize', studentIds: [a, b], prizes: [{ prizeId, quantity: 3 }], perStudentLimit: 2 })).resolves.toEqual(expect.any(String));
+});
+
+test('student-prize session view counts candidate capacity rather than summed prize quotas', async () => {
+  const [{ id: c }] = await db.insert(students).values({ classId, studentNumber: '003', name: '丙' }).returning({ id: students.id });
+  const [{ id: secondPrize }] = await db.insert(prizes).values({ classId, name: '第二奖品', stock: 11 }).returning({ id: prizes.id });
+  await db.update(prizes).set({ stock: 11 }).where(eq(prizes.id, prizeId));
+  const id = await createSession(classId, { mode: 'student-prize', studentIds: [a, b, c],
+    prizes: [{ prizeId, quantity: 11 }, { prizeId: secondPrize, quantity: 11 }], perStudentLimit: 4 });
+  await db.update(sessionStudents).set({ usedCount: 1 }).where(and(eq(sessionStudents.sessionId, id), eq(sessionStudents.studentId, a)));
+
+  expect(await getSession(id)).toMatchObject({ drawsRemaining: 11, prizes: [{ quantity: 11 }, { quantity: 11 }] });
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
+});
+
+test('fixed-prize activation reserves stock from concurrent sessions and completion releases unused units', async () => {
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
+  const first = await createSession(classId, { mode: 'prize-student', studentIds: [a, b], prizeId, roundCount: 2 });
+  const second = await createSession(classId, { mode: 'prize-student', studentIds: [a, b], prizeId, roundCount: 2 });
+  await activateSession(first);
+  expect((await db.select({ stock: prizes.stock }).from(prizes).where(eq(prizes.id, prizeId)))[0].stock).toBe(1);
+  await expect(activateSession(second)).rejects.toThrow('库存不足');
+  await completeSession(first);
+  expect((await db.select({ stock: prizes.stock }).from(prizes).where(eq(prizes.id, prizeId)))[0].stock).toBe(3);
+});
+
 test('foreign, archived, empty and duplicate candidates are rejected', async () => {
-  const base = { mode: 'student-prize' as const, studentIds: [a], prizes: [{ prizeId, quantity: 1 }], perStudentLimit: 1 };
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
+  const base = { mode: 'student-prize' as const, studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 };
   await expect(createSession(classId, { ...base, studentIds: [foreign] })).rejects.toThrow('候选数据不属于班级');
-  await expect(createSession(classId, { ...base, prizes: [{ prizeId: foreignPrize, quantity: 1 }] })).rejects.toThrow('候选数据不属于班级');
+  await expect(createSession(classId, { ...base, prizes: [{ prizeId: foreignPrize, quantity: 2 }] })).rejects.toThrow('候选数据不属于班级');
   await expect(createSession(classId, { ...base, studentIds: [] })).rejects.toThrow();
   await expect(createSession(classId, { ...base, studentIds: [a, a] })).rejects.toThrow();
   await expect(createSession(classId, { ...base, prizes: [] })).rejects.toThrow();
@@ -61,10 +108,10 @@ test('foreign, archived, empty and duplicate candidates are rejected', async () 
 });
 
 test('draft edits replace candidates, active config freezes, completed session refuses rounds', async () => {
-  const id = await createSession(classId, { mode: 'student-prize', studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 });
-  expect(await getSession(id)).toMatchObject({ status: 'draft', mode: 'student-prize', studentIds: [a], prizes: [{ prizeId, quantity: 2 }] });
-  await updateDraftSession(id, { mode: 'prize-student', studentIds: [b], prizeId, roundCount: 1 });
-  expect(await getSession(id)).toMatchObject({ status: 'draft', mode: 'prize-student', studentIds: [b], prizeId, roundCount: 1 });
+  const id = await createSession(classId, { mode: 'student-prize', title: '  \u6625\u5b63\u62bd\u5956  ', studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 });
+  expect(await getSession(id)).toMatchObject({ status: 'draft', mode: 'student-prize', title: '\u6625\u5b63\u62bd\u5956', studentIds: [a], prizes: [{ prizeId, quantity: 2 }] });
+  await updateDraftSession(id, { mode: 'prize-student', title: '\u671f\u672b\u62bd\u5956', studentIds: [b], prizeId, roundCount: 1 });
+  expect(await getSession(id)).toMatchObject({ status: 'draft', mode: 'prize-student', title: '\u671f\u672b\u62bd\u5956', studentIds: [b], prizeId, roundCount: 1 });
   expect(await db.select().from(sessionPrizes).where(eq(sessionPrizes.sessionId, id))).toEqual([]);
   expect(await db.select().from(sessionStudents).where(eq(sessionStudents.sessionId, id))).toHaveLength(1);
   await expect(updateDraftSession(id, { mode: 'prize-student', studentIds: [foreign], prizeId, roundCount: 1 })).rejects.toThrow();
@@ -76,6 +123,22 @@ test('draft edits replace candidates, active config freezes, completed session r
   expect(await getSession(id)).toMatchObject({ status: 'completed', studentIds: [b] });
   await expect(requireActiveSession(id)).rejects.toThrow('进行中');
   await expect(completeSession(id)).rejects.toThrow('进行中');
+});
+
+test('session titles are trimmed and limited to 120 characters on create and draft update', async () => {
+  const base = { mode: 'student-prize' as const, studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 };
+  const title = '\u62bd'.repeat(120);
+  const id = await createSession(classId, { ...base, title: `  ${title}  ` });
+  expect((await getSession(id)).title).toBe(title);
+
+  const tooLong = '\u62bd'.repeat(121);
+  await expect(createSession(classId, { ...base, title: tooLong })).rejects.toThrow('场次名称不能超过 120 个字符');
+  await expect(updateDraftSession(id, { ...base, title: tooLong })).rejects.toThrow('场次名称不能超过 120 个字符');
+  await updateDraftSession(id, { ...base, title: '   ' });
+  expect((await getSession(id)).title).toBeNull();
+  await db.delete(sessionPrizes).where(eq(sessionPrizes.sessionId, id));
+  await db.delete(sessionStudents).where(eq(sessionStudents.sessionId, id));
+  await db.delete(lotterySessions).where(eq(lotterySessions.id, id));
 });
 
 test('activation revalidates stock and archived candidates', async () => {
@@ -90,10 +153,12 @@ test('activation revalidates stock and archived candidates', async () => {
   await db.update(students).set({ archived: false }).where(eq(students.id, b));
   await activateSession(id);
   expect((await db.select().from(lotterySessions).where(eq(lotterySessions.id, id)))[0].status).toBe('active');
+  await completeSession(id);
 });
 
 test('revoked teacher and banned admin cannot mutate through old sessions', async () => {
-  const id = await createSession(classId, { mode: 'student-prize', studentIds: [a], prizes: [{ prizeId, quantity: 1 }], perStudentLimit: 1 });
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
+  const id = await createSession(classId, { mode: 'student-prize', studentIds: [a], prizes: [{ prizeId, quantity: 2 }], perStudentLimit: 1 });
   await db.delete(classTeachers).where(and(eq(classTeachers.classId, classId), eq(classTeachers.teacherId, teacherId)));
   await expect(createSession(classId, { mode: 'prize-student', studentIds: [a], prizeId, roundCount: 1 })).rejects.toThrow();
   await expect(updateDraftSession(id, { mode: 'prize-student', studentIds: [a], prizeId, roundCount: 1 })).rejects.toThrow();
@@ -109,6 +174,7 @@ test('revoked teacher and banned admin cannot mutate through old sessions', asyn
 
 test('an unfinished round prevents completion', async () => {
   cookie = adminCookie;
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
   const id = await createSession(classId, { mode: 'prize-student', studentIds: [a], prizeId, roundCount: 1 });
   await activateSession(id);
   const [round] = await db.insert(lotteryRounds).values({ classId, sessionId: id, startToken: randomUUID(), startedBy: teacherId }).returning({ id: lotteryRounds.id });
@@ -122,16 +188,27 @@ test('form action validates numbers and activates persisted draft', async () => 
   const data = new FormData();
   data.set('classId', classId); data.set('mode', 'prize-student'); data.set('studentIds', String(a));
   data.set('prizeId', prizeId); data.set('roundCount', '1.5');
+  data.set('title', '  \u73ed\u7ea7\u5e86\u5178  ');
   expect((await saveSessionAction(data)).ok).toBe(false);
   data.set('roundCount', '1');
   const result = await saveSessionAction(data);
   expect(result, result.message).toMatchObject({ ok: true });
-  const [row] = await db.select().from(lotterySessions).where(and(eq(lotterySessions.classId, classId), eq(lotterySessions.status, 'draft'))).orderBy(lotterySessions.createdAt);
+  data.set('title', '\u8d85'.repeat(121));
+  expect(await saveSessionAction(data)).toMatchObject({ ok: false, message: '场次名称不能超过 120 个字符' });
+  const [row] = await db.select().from(lotterySessions).where(eq(lotterySessions.id, result.sessionId!));
+  expect(row.title).toBe('\u73ed\u7ea7\u5e86\u5178');
   const activation = new FormData(); activation.set('sessionId', row.id);
   expect((await activateSessionAction(activation)).ok).toBe(true);
+  await completeSession(row.id);
 });
 
-test('mode one activation checks current stock without reserving it at creation', async () => {
+test('blank optional title persists as null', async () => {
+  await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
+  const id = await createSession(classId, { mode: 'prize-student', title: '   ', studentIds: [a], prizeId, roundCount: 1 });
+  expect(await getSession(id)).toMatchObject({ title: null });
+});
+
+test('mode one activation reserves stock only after the current stock check', async () => {
   cookie = adminCookie;
   const id = await createSession(classId, { mode: 'student-prize', studentIds: [a], prizes: [{ prizeId, quantity: 3 }], perStudentLimit: 1 });
   const [another] = await db.select().from(lotterySessions).where(eq(lotterySessions.id, id));
@@ -140,6 +217,8 @@ test('mode one activation checks current stock without reserving it at creation'
   await expect(activateSession(id)).rejects.toThrow('库存不足');
   await db.update(prizes).set({ stock: 3 }).where(eq(prizes.id, prizeId));
   await activateSession(id);
+  expect((await db.select({ stock: prizes.stock }).from(prizes).where(eq(prizes.id, prizeId)))[0].stock).toBe(0);
+  await completeSession(id);
 });
 
 test('revocation while a write waits for the class lock leaves no draft', async () => {
@@ -182,8 +261,8 @@ test.each(['single', 'list'] as const)('%s read cannot outlive a committed teach
   await db.insert(classes).values({ id, name: '读取撤权班' });
   await db.insert(classTeachers).values({ classId: id, teacherId });
   const [{ id: candidate }] = await db.insert(students).values({ classId: id, studentNumber: '001', name: '保密学生' }).returning({ id: students.id });
-  const [{ id: reward }] = await db.insert(prizes).values({ classId: id, name: '保密奖品', stock: 1 }).returning({ id: prizes.id });
-  const sessionId = await createSession(id, { mode: 'student-prize', studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 1 }], perStudentLimit: 1 });
+  const [{ id: reward }] = await db.insert(prizes).values({ classId: id, name: '保密奖品', stock: 2 }).returning({ id: prizes.id });
+  const sessionId = await createSession(id, { mode: 'student-prize', studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 2 }], perStudentLimit: 1 });
 
   let release!: () => void, locked!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -229,6 +308,6 @@ test.each(['single', 'list'] as const)('%s read cannot outlive a committed teach
   const view = readOutcome?.status === 'fulfilled'
     ? kind === 'single' ? readOutcome.value : (readOutcome.value as Awaited<ReturnType<typeof listSessions>>)[0]
     : null;
-  expect(view).toMatchObject({ id: sessionId, studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 1 }] });
+  expect(view).toMatchObject({ id: sessionId, studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 2 }] });
   expect(await db.select().from(classTeachers).where(and(eq(classTeachers.classId, id), eq(classTeachers.teacherId, teacherId)))).toEqual([]);
 }, 15000);

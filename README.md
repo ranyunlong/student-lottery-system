@@ -1,4 +1,4 @@
-# 学生抽奖系统部署与本地开发
+# 抽奖系统部署与本地开发
 
 ## 本地安装与启动
 
@@ -17,7 +17,11 @@ node --env-file=.env --run db:migrate
 node --env-file=.env --run dev
 ```
 
-Next.js 默认在 `http://localhost:3000` 提供本地应用。停止本地测试数据库：
+Next.js 默认在 `http://localhost:3000` 提供本地应用。
+
+本地班徽默认保存到项目根目录的 `data/emblems`，首次上传时自动创建；如需自定义位置，在 `.env` 中设置 `EMBLEM_DIR`。上传、读取和清理均使用同一目录，Docker Compose 继续使用独立的班徽数据卷。
+
+停止本地测试数据库：
 
 ```sh
 docker compose -f compose.test.yml stop postgres

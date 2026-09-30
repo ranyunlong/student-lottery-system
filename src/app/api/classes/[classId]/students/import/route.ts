@@ -1,5 +1,5 @@
 import { ForbiddenError, requireClassAccess } from '../../../../../../lib/access';
-import { parseExcelStudents } from '../../../../../../features/students/excel';
+import { createStudentImportTemplate, parseExcelStudents } from '../../../../../../features/students/excel';
 import { importStudents } from '../../../../../../features/students/service';
 
 type Context = { params: Promise<{ classId: string }> };
@@ -58,6 +58,21 @@ async function readForm(request: Request): Promise<FormData> {
     return await new Request(request.url, { method: 'POST', headers: { 'content-type': type },
       body: new Uint8Array(Buffer.concat(chunks)) }).formData();
   } catch { throw new UploadError('表单格式无效'); }
+}
+
+export async function GET(_request: Request, context: Context): Promise<Response> {
+  try {
+    const { classId } = await context.params;
+    if (!classIdPattern.test(classId)) throw new UploadError('班级编号无效');
+    await requireClassAccess(classId);
+    const bytes = await createStudentImportTemplate();
+    return new Response(new Uint8Array(bytes), { headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="student-import-template.xlsx"; filename*=UTF-8''${encodeURIComponent('学生导入模板.xlsx')}`,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    } });
+  } catch (error) { return errorResponse(error); }
 }
 
 export async function POST(request: Request, context: Context): Promise<Response> {

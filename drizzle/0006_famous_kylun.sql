@@ -1,0 +1,3 @@
+ALTER TABLE "class_teachers" ADD COLUMN "role" text DEFAULT 'teaching' NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "class_teachers_one_primary_per_class_idx" ON "class_teachers" USING btree ("class_id") WHERE "class_teachers"."role" = 'primary';--> statement-breakpoint
+ALTER TABLE "class_teachers" ADD CONSTRAINT "class_teachers_role_check" CHECK ("class_teachers"."role" in ('primary', 'teaching'));
