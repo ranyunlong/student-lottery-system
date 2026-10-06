@@ -6,10 +6,10 @@ import { APIError } from 'better-auth/api';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client';
 import * as authSchema from '../db/auth-schema';
-import { resolveTrustedOrigins } from './trusted-origins';
+import { resolveAuthBaseURL, resolveTrustedOrigins } from './trusted-origins';
 
 export const auth = betterAuth({
-  baseURL: process.env.BETTER_AUTH_URL,
+  baseURL: resolveAuthBaseURL(),
   trustedOrigins: resolveTrustedOrigins(),
   database: drizzleAdapter(db, { provider: 'pg', schema: authSchema }),
   emailAndPassword: { enabled: true, disableSignUp: true },
