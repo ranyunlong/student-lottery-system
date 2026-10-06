@@ -18,7 +18,7 @@ services:
       start_period: 10s
 
   app:
-    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.7
+    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.8
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
@@ -42,7 +42,7 @@ services:
       start_period: 20s
 
   cleanup:
-    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.7
+    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.8
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
