@@ -11,6 +11,16 @@ import { cn } from '../../components/ui/utils';
 type StudentItem = { id: number; label: string };
 type PrizeItem = { id: string; name: string; stock: number };
 
+function initialPrizeQuantities(items: PrizeItem[], initialQuantities: Record<string, number>) {
+  return {
+    ...Object.fromEntries(items.map((item) => [item.id, item.stock])),
+    ...Object.fromEntries(items.flatMap((item) => {
+      const quantity = initialQuantities[item.id];
+      return quantity === undefined ? [] : [[item.id, Math.min(Math.max(quantity, 1), item.stock)] as [string, number]];
+    })),
+  };
+}
+
 function TransferPanel({ title, count, children, empty }: { title: string; count: number; children: React.ReactNode; empty: string }) {
   return <section className="min-w-0 rounded-lg border border-workspace-line bg-workspace-surface-alt/55 p-3" aria-label={title}>
     <div className="mb-2 flex items-center justify-between gap-2">
@@ -58,10 +68,7 @@ export function PrizeTransferBox({ items, initialQuantities = {}, single = false
   const stockItems = useMemo(() => items.filter((item) => item.stock > 0), [items]);
   const initialIds = stockItems.filter((item) => item.id in initialQuantities).map((item) => item.id);
   const [selectedIds, setSelectedIds] = useState<string[]>(single ? initialIds.slice(0, 1) : initialIds);
-  const [quantities, setQuantities] = useState<Record<string, number>>(() => ({
-    ...Object.fromEntries(stockItems.map((item) => [item.id, item.stock])),
-    ...initialQuantities,
-  }));
+  const [quantities, setQuantities] = useState<Record<string, number>>(() => initialPrizeQuantities(stockItems, initialQuantities));
   const [query, setQuery] = useState('');
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const filtered = useMemo(() => stockItems.filter((item) => item.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [stockItems, query]);

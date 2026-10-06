@@ -54,6 +54,8 @@ test('prize transfer box only offers in-stock prizes and separates stock from th
   const name = within(row).getByText('画册');
   const stock = within(row).getByText('库存 3');
   const arrow = row.querySelector('svg');
+  expect(arrow).not.toBeNull();
+  if (!arrow) throw new Error('Expected transfer row arrow icon');
   expect(name.contains(stock)).toBe(false);
   expect(name.compareDocumentPosition(stock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(stock.compareDocumentPosition(arrow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -84,6 +86,13 @@ test('selected prize quantity cannot be entered above its stock', async () => {
   const quantity = screen.getByRole('textbox', { name: '本场数量 画册' });
   await user.clear(quantity);
   await user.type(quantity, '4');
+  expect(quantity).toHaveValue('3');
+});
+
+test('a draft quantity is clamped to the prize stock currently available', () => {
+  render(<PrizeTransferBox items={[{ id: 'p1', name: '画册', stock: 3 }]} initialQuantities={{ p1: 5 }} />);
+
+  const quantity = screen.getByRole('textbox', { name: '本场数量 画册' });
   expect(quantity).toHaveValue('3');
 });
 
