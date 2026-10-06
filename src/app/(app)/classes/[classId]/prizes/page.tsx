@@ -10,6 +10,7 @@ import { Badge } from '../../../../../components/ui/badge';
 import { EmptyState } from '../../../../../components/ui/empty-state';
 import { Field } from '../../../../../components/ui/field';
 import { Input } from '../../../../../components/ui/input';
+import { NumberInput } from '../../../../../components/ui/number-input';
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from '../../../../../components/ui/table';
 import { db } from '../../../../../db/client';
 import { classes } from '../../../../../db/schema';
@@ -38,7 +39,7 @@ export default async function PrizesPage({ params }: { params: Promise<{ classId
         <ActionForm action={createPrizeAction} label="创建奖品">
           <input type="hidden" name="classId" value={classId} />
           <Field label="奖品名称" className="w-full"><Input name="name" required maxLength={200} /></Field>
-          <Field label="初始库存" className="w-full"><Input name="openingStock" type="number" min="0" max="2147483647" step="1" required /></Field>
+          <Field label="初始库存" className="w-full"><NumberInput name="openingStock" min={0} max={2147483647} step={1} required /></Field>
         </ActionForm>
       </CreateDialog>
     </section>

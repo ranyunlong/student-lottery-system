@@ -4,6 +4,7 @@ import { user } from '../../db/auth-schema';
 import { classes, classTeachers, students } from '../../db/schema';
 import { ForbiddenError, requireClassAccess, requireSession } from '../../lib/access';
 import { MAX_STUDENT_ROWS, type StudentRow } from './parse';
+import { sortStudentsByNumber } from './sort';
 
 export type Student = typeof students.$inferSelect;
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -57,7 +58,9 @@ export async function importStudents(classId: string, rows: StudentRow[]): Promi
 
 export async function listStudents(classId: string): Promise<Student[]> {
   await requireClassAccess(classId);
-  return db.select().from(students).where(eq(students.classId, classId)).orderBy(asc(students.studentNumber), asc(students.id));
+  const roster = await db.select().from(students).where(eq(students.classId, classId))
+    .orderBy(asc(students.studentNumber), asc(students.id));
+  return sortStudentsByNumber(roster);
 }
 
 async function setArchived(classId: string, studentId: number, archived: boolean): Promise<void> {

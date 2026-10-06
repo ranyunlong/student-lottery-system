@@ -8,6 +8,10 @@ import { db } from '../db/client';
 import * as authSchema from '../db/auth-schema';
 
 export const auth = betterAuth({
+  trustedOrigins: [
+    "http://localhost:3000",
+    process.env.DOMAIN
+  ].filter(Boolean) as string[],
   database: drizzleAdapter(db, { provider: 'pg', schema: authSchema }),
   emailAndPassword: { enabled: true, disableSignUp: true },
   user: {

@@ -78,7 +78,7 @@ test('pending winnings search matches student name and number, and clearing rest
 
   render(await WinningsPage({ params: Promise.resolve({ classId: 'class-1' }), searchParams: Promise.resolve({ studentId: '12' }) }));
   const search = screen.getByRole('searchbox', { name: '搜索学生姓名或学号' });
-  expect(search.closest('label')?.parentElement?.parentElement).toHaveClass('rounded-md', 'border', 'bg-workspace-surface');
+  expect(search.closest('div.grid')).toHaveClass('rounded-md', 'border', 'bg-workspace-surface');
   expect(screen.getByRole('row', { name: /张三/ })).toBeInTheDocument();
   expect(screen.queryByRole('row', { name: /李四/ })).not.toBeInTheDocument();
   expect(screen.getByText('仅显示该学生的待兑换记录')).toBeInTheDocument();

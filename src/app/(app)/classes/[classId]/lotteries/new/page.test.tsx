@@ -88,7 +88,7 @@ test('per-student draw limit sits beside the create action and wraps on narrow l
   render(await SessionSetupPage({ params: Promise.resolve({ classId: 'class-1' }), searchParams: Promise.resolve({ mode: 'student-prize' }) }));
 
   const limit = screen.getByLabelText('每人最多抽取次数');
-  const field = limit.closest('label')?.parentElement;
+  const field = limit.parentElement?.parentElement;
   const submit = screen.getByRole('button', { name: '创建并进入现场抽奖' });
   expect(field?.nextElementSibling).toBe(submit);
   expect(field).toHaveClass('w-64', 'max-w-full');

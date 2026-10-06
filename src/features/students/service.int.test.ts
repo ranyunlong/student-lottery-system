@@ -59,6 +59,22 @@ test('identical numbers in different classes stay isolated and foreign writes fa
   expect((await db.select().from(students).where(eq(students.id, foreign.id)))[0]).toMatchObject({ name: '外班', archived: false });
 });
 
+test('lists students by student number in natural ascending order', async () => {
+  const id = randomUUID();
+  await db.insert(classes).values({ id, name: '学号排序班' });
+  await db.insert(classTeachers).values({ classId: id, teacherId });
+  activeCookie = teacherCookie;
+  await importStudents(id, [
+    { studentNumber: '10', name: '十号', gender: null },
+    { studentNumber: '2', name: '二号', gender: null },
+    { studentNumber: '001', name: '一号', gender: null },
+    { studentNumber: 'A10', name: '字母十号', gender: null },
+    { studentNumber: 'A2', name: '字母二号', gender: null },
+  ]);
+  expect((await listStudents(id)).map((student) => student.studentNumber))
+    .toEqual(['001', '2', '10', 'A2', 'A10']);
+});
+
 test('duplicate and invalid rows roll the entire batch back', async () => {
   activeCookie = teacherCookie;
   const before = await listStudents(classId);

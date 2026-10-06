@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 const { routerRefresh } = vi.hoisted(() => ({ routerRefresh: vi.fn() }));
@@ -320,8 +320,8 @@ test('reduced motion keeps the reel readable and stationary while preserving the
   vi.unstubAllGlobals();
 });
 
-test('sound is created only after a draw click and can be muted', async () => {
-  const user = userEvent.setup();
+test('sound is created for each slot ticker jump, not at start or stop, and can be muted', async () => {
+  vi.useFakeTimers();
   const oscillator = {
     connect: vi.fn(), start: vi.fn(), stop: vi.fn(),
     frequency: { setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() },
@@ -337,20 +337,45 @@ test('sound is created only after a draw click and can be muted', async () => {
     close = vi.fn(async () => {});
     resume = vi.fn(async () => {});
   }
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   vi.stubGlobal('AudioContext', MockAudioContext);
-  render(<DrawStage session={session} actions={actions()} immersive />);
+  try {
+    render(<DrawStage session={{
+      ...session,
+      prizes: [
+        { id: 'p1', name: '画册', stock: 2, quotaRemaining: 2 },
+        { id: 'p2', name: '彩笔', stock: 2, quotaRemaining: 2 },
+      ],
+    }} actions={actions()} immersive />);
 
-  expect(audioContext).not.toHaveBeenCalled();
-  expect(screen.getByRole('slider', { name: '音效音量' })).toHaveValue('0.04');
-  await user.click(screen.getByRole('button', { name: '静音音效' }));
-  await user.click(screen.getByRole('button', { name: '开始抽奖' }));
-  expect(audioContext).not.toHaveBeenCalled();
+    expect(audioContext).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '开始抽奖' }));
+    await act(async () => {});
+    expect(audioContext).not.toHaveBeenCalled();
 
-  await user.click(screen.getByRole('button', { name: '开启音效' }));
-  await user.click(screen.getByRole('button', { name: '停止' }));
-  expect(audioContext).toHaveBeenCalledTimes(1);
-  expect(oscillator.start).toHaveBeenCalledTimes(1);
-  vi.unstubAllGlobals();
+    await act(async () => { vi.advanceTimersByTime(520); });
+    expect(audioContext).toHaveBeenCalledTimes(1);
+    expect(oscillator.start).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(520); });
+    expect(audioContext).toHaveBeenCalledTimes(2);
+    expect(oscillator.start).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '停止' }));
+    await act(async () => {});
+    expect(screen.getByRole('region', { name: '中奖结果' })).toBeInTheDocument();
+    expect(audioContext).toHaveBeenCalledTimes(2);
+    expect(oscillator.start).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '静音音效' }));
+    fireEvent.click(screen.getByRole('button', { name: '下一轮' }));
+    await act(async () => {});
+    await act(async () => { vi.advanceTimersByTime(520); });
+    expect(audioContext).toHaveBeenCalledTimes(2);
+    expect(oscillator.start).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
 });
 
 test('reduced motion suppresses lottery sound', async () => {

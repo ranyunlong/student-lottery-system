@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import { AlertTriangle, CheckCircle2, LoaderCircle, Play, RotateCcw, Square, Volume2, VolumeX } from 'lucide-react';
 import type { DrawResult } from './types';
@@ -74,13 +74,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
   const effectiveSelectedStudent = selectedStudent && !selectedCandidateAvailable
     ? String(availableCandidates[0]?.id ?? '') : selectedStudent;
 
-  useEffect(() => {
-    if (!running || rollingItems.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const interval = window.setInterval(() => setTickerIndex((current) => (current + 1) % rollingItems.length), 520);
-    return () => window.clearInterval(interval);
-  }, [rollingItems, running]);
-
-  function playSoundCue(frequency: number) {
+  const playSoundCue = useCallback((frequency: number) => {
     if (!immersive || soundMuted || soundVolume <= 0 || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return;
     const AudioContextConstructor = window.AudioContext;
     if (!AudioContextConstructor) return;
@@ -104,11 +98,19 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
     } catch {
       // Sound is optional and must not interfere with round controls.
     }
-  }
+  }, [immersive, soundMuted, soundVolume]);
+
+  useEffect(() => {
+    if (!running || rollingItems.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const interval = window.setInterval(() => {
+      setTickerIndex((current) => (current + 1) % rollingItems.length);
+      playSoundCue(620);
+    }, 520);
+    return () => window.clearInterval(interval);
+  }, [playSoundCue, rollingItems, running]);
 
   async function start() {
     if (busy || running || session.drawsRemaining <= 0 || outOfStock || (session.mode === 'student-prize' && !effectiveSelectedStudent)) return;
-    playSoundCue(520);
     setBusy(true); setError('');
     try {
       const started = await actions.start(session.mode === 'student-prize' ? Number(effectiveSelectedStudent) : undefined);
@@ -118,7 +120,6 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
 
   async function stop() {
     if (!token || busy) return;
-    playSoundCue(740);
     setBusy(true); setError('');
     try {
       const committed = await actions.stop(token);

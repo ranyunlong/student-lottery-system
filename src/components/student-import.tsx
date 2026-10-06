@@ -3,9 +3,10 @@
 import { useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Archive, ChevronLeft, ChevronRight, ClipboardPaste, Download, Eye, FileSpreadsheet, Gift, LoaderCircle, RotateCcw, Search, Upload } from 'lucide-react';
+import { Archive, ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ClipboardPaste, Download, Eye, FileSpreadsheet, Gift, LoaderCircle, RotateCcw, Search, Upload } from 'lucide-react';
 import { archiveStudentAction, importPastedStudentsAction, restoreStudentAction } from '../features/students/actions';
 import { parsePastedStudents, type ImportPreview } from '../features/students/parse';
+import { sortStudentsByNumber, type StudentNumberSortDirection } from '../features/students/sort';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { EmptyState } from './ui/empty-state';
@@ -40,6 +41,7 @@ export function StudentImport({ classId, students }: { classId: string; students
   const [query, setQuery] = useState('');
   const [draftQuery, setDraftQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
+  const [studentSort, setStudentSort] = useState<StudentNumberSortDirection>('asc');
   const [page, setPage] = useState(0);
   const [studentToArchive, setStudentToArchive] = useState<StudentItem | null>(null);
 
@@ -191,7 +193,7 @@ export function StudentImport({ classId, students }: { classId: string; students
     } finally { setBusy(false); }
   }
 
-  const searched = students.filter((student) =>
+  const searched = sortStudentsByNumber(students, studentSort).filter((student) =>
     (filter === 'all' || (filter === 'archived') === student.archived)
     && (student.studentNumber.includes(query.trim()) || student.name.includes(query.trim())));
   const pages = Math.max(1, Math.ceil(searched.length / PAGE_SIZE));
@@ -296,7 +298,19 @@ export function StudentImport({ classId, students }: { classId: string; students
       {visible.length ? <div className="rounded-md border border-workspace-line bg-white">
         <Table className="min-w-[56rem]">
           <TableCaption className="sr-only">学生名单</TableCaption>
-          <TableHeader><TableRow><TableHead>学号</TableHead><TableHead>姓名</TableHead><TableHead>性别</TableHead><TableHead>状态</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+          <TableHeader><TableRow>
+            <TableHead aria-sort={studentSort === 'asc' ? 'ascending' : 'descending'}>
+              <button type="button" className="inline-flex items-center gap-1 text-current hover:text-workspace-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-workspace-accent"
+                aria-label={studentSort === 'asc' ? '按学号升序排序' : '按学号降序排序'}
+                onClick={() => { setStudentSort(studentSort === 'asc' ? 'desc' : 'asc'); setPage(0); }}>
+                学号
+                {studentSort === 'asc'
+                  ? <ArrowUp aria-hidden="true" className="size-3.5" />
+                  : <ArrowDown aria-hidden="true" className="size-3.5" />}
+              </button>
+            </TableHead>
+            <TableHead>姓名</TableHead><TableHead>性别</TableHead><TableHead>状态</TableHead><TableHead>操作</TableHead>
+          </TableRow></TableHeader>
           <TableBody>{visible.map((student) => <TableRow key={student.id}>
             <TableCell><span className="sr-only">学号</span><span className="break-all font-mono font-medium">{student.studentNumber}</span></TableCell>
             <TableCell><span className="sr-only">姓名</span><span className="break-words font-medium">{student.name}</span></TableCell>

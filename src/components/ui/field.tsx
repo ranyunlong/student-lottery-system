@@ -52,10 +52,12 @@ export function Field({ label, description, hint, error, required = false, child
     : children;
 
   return <div className={cn('min-w-0', className)}>
-    <label className="flex min-w-0 flex-col gap-1.5 text-sm font-medium text-workspace-ink" htmlFor={controlId} {...props}>
-      <span>{label}{required && <span aria-hidden="true" className="ml-1 text-workspace-danger">*</span>}</span>
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label className="min-w-0 text-sm font-medium text-workspace-ink" htmlFor={controlId} {...props}>
+        <span>{label}{required && <span aria-hidden="true" className="ml-1 text-workspace-danger">*</span>}</span>
+      </label>
       {enhancedChildren}
-    </label>
+    </div>
     {helper && <span id={descriptionId} className="mt-1 block text-xs font-normal text-workspace-muted">{helper}</span>}
     {error && <span id={errorId} className="mt-1 block text-xs font-normal text-workspace-danger">{error}</span>}
   </div>;

@@ -23,7 +23,11 @@ function sameOrigin(request: Request): boolean {
   try {
     const expected = new URL(request.url);
     const host = request.headers.get('host');
-    if (host) expected.host = host;
+    if (host) {
+      // URL.host keeps the upstream port when the proxy host has no explicit port.
+      expected.port = '';
+      expected.host = host;
+    }
     const protocol = request.headers.get('x-forwarded-proto')?.split(',')[0].trim();
     if (protocol === 'http' || protocol === 'https') expected.protocol = `${protocol}:`;
     return new URL(origin).origin === origin && origin === expected.origin;

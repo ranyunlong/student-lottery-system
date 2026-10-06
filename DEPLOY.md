@@ -70,7 +70,7 @@ docker login --username=<你的阿里云账号> registry.cn-hangzhou.aliyuncs.co
 docker tag student-lottery-system-app:latest registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.1
 
 # 推送
-docker push registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.1
+docker push registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.2
 ```
 
 ---
@@ -168,7 +168,7 @@ docker compose logs -f app
 # 健康检查
 curl -f https://luck.geckoai.cn/api/health
 ```
-
+docker compose exec -e ADMIN_EMAIL="549510622@qq.com" -e ADMIN_PASSWORD="32bf9a741129e57d64fbfea7e4565385578c94056b0356090c5dfa7f5bdd98da" app npx tsx scripts/create-admin.ts
 ---
 
 ## 4. 数据与备份
@@ -321,4 +321,6 @@ Caddy 自动通过 Let's Encrypt 签发证书，确保：
 docker login registry.cn-hangzhou.aliyuncs.com
 # 手动拉取
 docker pull registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.0
+
+docker compose -f compose.deploy.yml up -d
 ```

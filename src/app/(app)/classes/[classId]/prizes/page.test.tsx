@@ -42,6 +42,34 @@ test('renders prize stock as a responsive table and opens stock adjustment in a 
   expect(screen.queryByText('管理奖品、库存调整和库存流水。')).not.toBeInTheDocument();
 });
 
+test('uses custom number inputs for prize creation and stock adjustment', async () => {
+  vi.mocked(listPrizes).mockResolvedValue([{ id: 'prize-1', name: '文具盒', stock: 8, archived: false }] as never);
+  vi.mocked(listStockEvents).mockResolvedValue([] as never);
+  render(await PrizesPage({ params: Promise.resolve({ classId: 'class-1' }) }));
+
+  fireEvent.click(screen.getByRole('button', { name: '调整库存' }));
+  const stockDialog = screen.getByRole('dialog', { name: '调整库存：文具盒' });
+  const delta = within(stockDialog).getByLabelText('增减数量');
+  expect(delta).toHaveAttribute('type', 'text');
+  expect(delta).toHaveAttribute('inputmode', 'numeric');
+  fireEvent.click(within(stockDialog).getByRole('button', { name: '减少数量' }));
+  fireEvent.click(within(stockDialog).getByRole('button', { name: '增加数量' }));
+  fireEvent.click(within(stockDialog).getByRole('button', { name: '减少数量' }));
+  fireEvent.click(within(stockDialog).getByRole('button', { name: '减少数量' }));
+  const stockForm = within(stockDialog).getByRole('button', { name: '确认调整' }).closest('form')!;
+  expect(new FormData(stockForm).get('delta')).toBe('-2');
+  fireEvent.click(within(stockDialog).getByRole('button', { name: '关闭对话框' }));
+
+  fireEvent.click(screen.getByRole('button', { name: '创建奖品' }));
+  const createDialog = screen.getByRole('dialog', { name: '创建奖品' });
+  const openingStock = within(createDialog).getByLabelText('初始库存');
+  expect(openingStock).toHaveAttribute('type', 'text');
+  expect(openingStock).toHaveAttribute('inputmode', 'numeric');
+  fireEvent.click(within(createDialog).getByRole('button', { name: '增加数量' }));
+  const createForm = within(createDialog).getByRole('button', { name: '创建奖品' }).closest('form')!;
+  expect(new FormData(createForm).get('openingStock')).toBe('1');
+});
+
 test('keeps stock adjustment controls out of the table cell and preserves accessible history', async () => {
   vi.mocked(listPrizes).mockResolvedValue([{ id: 'prize-1', name: '文具盒', stock: 8, archived: false }] as never);
   vi.mocked(listStockEvents).mockResolvedValue([] as never);

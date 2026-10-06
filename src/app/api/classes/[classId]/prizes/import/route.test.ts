@@ -50,6 +50,46 @@ test('rejects cross-origin and unauthorized uploads', async () => {
   expect(importPrizes).not.toHaveBeenCalled();
 });
 
+test('accepts same-origin uploads behind an Nginx reverse proxy', async () => {
+  const book = new ExcelJS.Workbook();
+  book.addWorksheet('奖品').addRows([['奖品名称', '补充数量'], ['铅笔', 4]]);
+  const form = new FormData();
+  form.set('intent', 'preview');
+  form.set('file', new File([await book.xlsx.writeBuffer()], 'prizes.xlsx'));
+  const proxyUrl = url.replace('http://localhost', 'http://127.0.0.1:3000');
+  const response = await route.POST(new Request(proxyUrl, {
+    method: 'POST',
+    headers: {
+      origin: 'https://luck.example.com',
+      host: 'luck.example.com',
+      'x-forwarded-proto': 'https',
+    },
+    body: form,
+  }), { params: Promise.resolve({ classId }) });
+  expect(response.status).toBe(200);
+});
+
+test('ignores a client-supplied forwarded host', async () => {
+  const book = new ExcelJS.Workbook();
+  book.addWorksheet('奖品').addRows([['奖品名称', '补充数量'], ['铅笔', 4]]);
+  const form = new FormData();
+  form.set('intent', 'confirm');
+  form.set('file', new File([await book.xlsx.writeBuffer()], 'prizes.xlsx'));
+  const proxyUrl = url.replace('http://localhost', 'http://127.0.0.1:3000');
+  const response = await route.POST(new Request(proxyUrl, {
+    method: 'POST',
+    headers: {
+      origin: 'https://evil.example',
+      host: 'luck.example.com',
+      'x-forwarded-host': 'evil.example',
+      'x-forwarded-proto': 'https',
+    },
+    body: form,
+  }), { params: Promise.resolve({ classId }) });
+  expect(response.status).toBe(403);
+  expect(importPrizes).not.toHaveBeenCalled();
+});
+
 test('reports stock overflow as a validation error without crashing the upload response', async () => {
   vi.mocked(importPrizes).mockRejectedValueOnce(new Error('“铅笔”库存数量超出范围'));
   const response = await upload('confirm');

@@ -46,6 +46,24 @@ test('keeps roster table label for accessibility without the duplicate visible h
   expect(screen.queryByText('2 人')).not.toBeInTheDocument();
 });
 
+test('toggles student number sorting between ascending and descending', () => {
+  render(<StudentImport classId="class-one" students={[
+    { id: 3, studentNumber: '10', name: '十号', gender: null, archived: false },
+    { id: 2, studentNumber: '2', name: '二号', gender: null, archived: false },
+    { id: 1, studentNumber: '001', name: '一号', gender: null, archived: false },
+  ]} />);
+  const table = screen.getByRole('table', { name: '学生名单' });
+  const rowNames = () => within(table).getAllByRole('row').slice(1)
+    .map((row) => within(row).getAllByRole('cell')[0].textContent.replace(/^学号/, ''));
+  expect(rowNames()).toEqual(['001', '2', '10']);
+
+  fireEvent.click(screen.getByRole('button', { name: '按学号升序排序' }));
+  expect(rowNames()).toEqual(['10', '2', '001']);
+
+  fireEvent.click(screen.getByRole('button', { name: '按学号降序排序' }));
+  expect(rowNames()).toEqual(['001', '2', '10']);
+});
+
 test('late Excel 422 confirmation cannot restore A preview or error after selecting B', async () => {
   let finishConfirm!: (response: Response) => void;
   const pending = new Promise<Response>((resolve) => { finishConfirm = resolve; });
@@ -193,7 +211,7 @@ test('searches and filters roster and names explicit archive/restore actions', a
   expect(rosterTable.querySelector('thead')).not.toHaveClass('max-[1024px]:sr-only');
   expect(rosterTable.closest('div.overflow-x-auto')).toBeInTheDocument();
   const rosterSearch = screen.getByLabelText('搜索名单');
-  expect(rosterSearch.closest('label')?.parentElement?.parentElement).toHaveClass('rounded-md', 'border', 'bg-workspace-surface');
+  expect(rosterSearch.closest('form')).toHaveClass('rounded-md', 'border', 'bg-workspace-surface');
   const row = within(rosterTable).getByRole('row', { name: /李四/ });
   expect(within(row).getAllByRole('cell')).toHaveLength(5);
   expect(within(row).getByText('002')).toBeInTheDocument();
