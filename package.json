@@ -18,6 +18,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:docker": "drizzle-kit migrate",
+    "clear:lottery": "sh scripts/clear-lottery-data.sh",
     "admin:create": "tsx scripts/create-admin.ts",
     "emblem:cleanup": "tsx scripts/retry-emblem-cleanup.ts",
     "emblem:cleanup:docker": "tsx scripts/retry-emblem-cleanup.ts"
