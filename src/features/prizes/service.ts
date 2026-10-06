@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { user } from '../../db/auth-schema';
 import { classes, classTeachers, prizes, stockEvents } from '../../db/schema';
@@ -7,6 +7,9 @@ import type { PrizeImportRow } from './excel';
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type StockEvent = { prizeId: string; delta: number; reason: string; actorId: string; actorName: string; createdAt: Date };
+export type PrizeSortField = 'name' | 'createdAt';
+export type PrizeSortOrder = 'asc' | 'desc';
+export type ListPrizesOptions = { search?: string; sort?: PrizeSortField; order?: PrizeSortOrder };
 
 async function requireMutationAccess(tx: Transaction, classId: string, actorId: string): Promise<void> {
   const [target] = await tx.select({ archived: classes.archived }).from(classes)
@@ -124,10 +127,19 @@ export async function listStockEvents(prizeId: string): Promise<StockEvent[]> {
     .orderBy(asc(stockEvents.createdAt), asc(stockEvents.id));
 }
 
-export async function listPrizes(classId: string): Promise<(typeof prizes.$inferSelect)[]> {
+function prizeNamePattern(value: string) {
+  return `${value.trim().toLocaleLowerCase().replace(/[!%_]/g, (character) => `!${character}`)}%`;
+}
+
+export async function listPrizes(classId: string, options: ListPrizesOptions = {}): Promise<(typeof prizes.$inferSelect)[]> {
   await requireClassAccess(classId);
-  return db.select().from(prizes).where(eq(prizes.classId, classId))
-    .orderBy(asc(prizes.archived), asc(prizes.name), asc(prizes.id));
+  const conditions = [eq(prizes.classId, classId)];
+  const search = options.search?.trim();
+  if (search) conditions.push(sql`lower(${prizes.name}) LIKE ${prizeNamePattern(search)} ESCAPE '!'`);
+  const direction = options.order === 'desc' ? desc : asc;
+  const sortField = options.sort === 'name' ? prizes.name : prizes.createdAt;
+  return db.select().from(prizes).where(and(...conditions))
+    .orderBy(asc(prizes.archived), direction(sortField), direction(prizes.id));
 }
 
 export async function archivePrize(classId: string, prizeId: string): Promise<void> {

@@ -24,7 +24,7 @@ export default async function SessionSetupPage({ params, searchParams }: {
   const mode = requestedMode === 'prize-student' || requestedMode === 'student-prize' ? requestedMode : existing?.mode ?? 'student-prize';
   const [students, prizes] = await Promise.all([listStudents(classId), listPrizes(classId)]);
   const roster = students.filter((item) => !item.archived);
-  const stock = prizes.filter((item) => !item.archived);
+  const stock = prizes.filter((item) => !item.archived && item.stock > 0);
   const selected = existing?.mode === mode ? existing : null;
   const query = sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : '';
   return <section className="min-w-0 space-y-5">

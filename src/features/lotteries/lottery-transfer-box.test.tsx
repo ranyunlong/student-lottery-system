@@ -34,26 +34,60 @@ test('prize transfer box keeps quantity inputs only for selected prizes', async 
   ]} initialQuantities={{ p2: 2 }} />);
 
   expect(screen.getByDisplayValue('p2')).toHaveAttribute('name', 'prizeIds');
-  const quantity = screen.getByRole('spinbutton', { name: '本场数量 彩笔' });
-  expect(quantity).toHaveValue(2);
-  expect(quantity).toHaveClass('h-8', 'min-h-8');
-  expect(quantity.closest('label')).toHaveClass('flex', 'items-center');
+  const quantity = screen.getByRole('textbox', { name: '本场数量 彩笔' });
+  expect(quantity).toHaveValue('2');
+  expect(quantity).toHaveAttribute('inputMode', 'numeric');
   await user.click(screen.getByRole('button', { name: '添加 画册' }));
   expect(screen.getByDisplayValue('p1')).toHaveAttribute('name', 'prizeIds');
   expect(within(screen.getByTestId('selected-prizes')).getByText('画册')).toBeVisible();
+  expect(screen.getByRole('textbox', { name: '本场数量 画册' })).toHaveValue('3');
+});
+
+test('prize transfer box only offers in-stock prizes and separates stock from the name', () => {
+  render(<PrizeTransferBox items={[
+    { id: 'p1', name: '画册', stock: 3 },
+    { id: 'p2', name: '铅笔', stock: 0 },
+  ]} />);
+
+  expect(screen.queryByRole('button', { name: '添加 铅笔' })).not.toBeInTheDocument();
+  const row = screen.getByRole('button', { name: '添加 画册' });
+  const name = within(row).getByText('画册');
+  const stock = within(row).getByText('库存 3');
+  const arrow = row.querySelector('svg');
+  expect(name.contains(stock)).toBe(false);
+  expect(name.compareDocumentPosition(stock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(stock.compareDocumentPosition(arrow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test('selected prizes show stock and step quantity between one and full stock', async () => {
+  const user = userEvent.setup();
+  render(<PrizeTransferBox items={[{ id: 'p1', name: '画册', stock: 3 }]} />);
+  await user.click(screen.getByRole('button', { name: '添加 画册' }));
+  expect(within(screen.getByTestId('selected-prizes')).getByText('库存 3')).toBeVisible();
+  const quantity = screen.getByRole('textbox', { name: '本场数量 画册' });
+  expect(quantity).toHaveValue('3');
+
+  await user.click(screen.getByRole('button', { name: '减少本场数量 画册' }));
+  expect(quantity).toHaveValue('2');
+  await user.click(screen.getByRole('button', { name: '减少本场数量 画册' }));
+  await user.click(screen.getByRole('button', { name: '减少本场数量 画册' }));
+  expect(quantity).toHaveValue('1');
+  await user.click(screen.getByRole('button', { name: '增加本场数量 画册' }));
+  await user.click(screen.getByRole('button', { name: '增加本场数量 画册' }));
+  await user.click(screen.getByRole('button', { name: '增加本场数量 画册' }));
+  expect(quantity).toHaveValue('3');
 });
 
 test('selected prize quantity cannot be entered above its stock', async () => {
   const user = userEvent.setup();
   render(<PrizeTransferBox items={[{ id: 'p1', name: '画册', stock: 3 }]} initialQuantities={{ p1: 2 }} />);
-  const quantity = screen.getByRole('spinbutton', { name: '本场数量 画册' });
+  const quantity = screen.getByRole('textbox', { name: '本场数量 画册' });
   await user.clear(quantity);
   await user.type(quantity, '4');
-  expect(quantity).toHaveValue(3);
+  expect(quantity).toHaveValue('3');
 });
 
 test('single prize availability is described in draw rounds rather than student count', () => {
   render(<PrizeTransferBox single items={[{ id: 'p1', name: '画册', stock: 6 }]} />);
   expect(screen.getByRole('button', { name: '添加 画册' })).toHaveTextContent('最多抽取 6 轮');
 });
-

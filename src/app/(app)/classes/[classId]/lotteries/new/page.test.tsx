@@ -49,7 +49,24 @@ test('candidate transfer controls add students and prizes to the submission', as
   await user.click(screen.getByRole('button', { name: '添加 画册' }));
   expect(document.querySelector('input[name="studentIds"]')).toHaveValue('42');
   expect(document.querySelector('input[name="prizeIds"]')).toHaveValue('prize-1');
-  expect(screen.getByRole('spinbutton', { name: '本场数量 画册' })).toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: '本场数量 画册' })).toBeInTheDocument();
+});
+
+test('student-prize mode only offers prizes with stock', async () => {
+  vi.mocked(listStudents).mockResolvedValue([{
+    id: 42, studentNumber: 'S042', name: '林同学', archived: false,
+  }] as never);
+  vi.mocked(listPrizes).mockResolvedValue([
+    { id: 'p1', name: '画册', stock: 6, archived: false },
+    { id: 'p2', name: '铅笔', stock: 0, archived: false },
+  ] as never);
+  render(await SessionSetupPage({
+    params: Promise.resolve({ classId: 'class-1' }),
+    searchParams: Promise.resolve({ mode: 'student-prize' }),
+  }));
+
+  expect(screen.getByRole('button', { name: '添加 画册' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '添加 铅笔' })).not.toBeInTheDocument();
 });
 
 test('session setup exposes an optional title', async () => {

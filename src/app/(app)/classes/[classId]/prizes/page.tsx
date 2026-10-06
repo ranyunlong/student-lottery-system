@@ -17,13 +17,28 @@ import { classes } from '../../../../../db/schema';
 import { createPrizeAction } from '../../../../../features/prizes/actions';
 import { listPrizes, listStockEvents } from '../../../../../features/prizes/service';
 import { requireClassAccess } from '../../../../../lib/access';
+import { PrizesFilters } from './PrizesFilters';
 import { StockAdjustmentDialog } from './stock-adjustment-dialog';
 
-export default async function PrizesPage({ params }: { params: Promise<{ classId: string }> }) {
+type PrizeQuery = { q?: string | string[]; sort?: string | string[]; order?: string | string[] };
+type PrizesPageProps = {
+  params: Promise<{ classId: string }>;
+  searchParams?: Promise<PrizeQuery>;
+};
+
+export default async function PrizesPage({ params, searchParams }: PrizesPageProps) {
   const { classId } = await params;
+  const query = await (searchParams ?? Promise.resolve<PrizeQuery>({}));
+  const rawSearch = Array.isArray(query.q) ? query.q[0] : query.q;
+  const rawSort = Array.isArray(query.sort) ? query.sort[0] : query.sort;
+  const rawOrder = Array.isArray(query.order) ? query.order[0] : query.order;
+  const search = (rawSearch ?? '').trim().slice(0, 100);
+  const sort = rawSort === 'name' ? 'name' : 'createdAt';
+  const order = rawOrder === 'desc' ? 'desc' : 'asc';
   await requireClassAccess(classId);
   const [items, [target]] = await Promise.all([
-    listPrizes(classId), db.select({ name: classes.name }).from(classes).where(eq(classes.id, classId)).limit(1),
+    listPrizes(classId, { search, sort, order }),
+    db.select({ name: classes.name }).from(classes).where(eq(classes.id, classId)).limit(1),
   ]);
   const histories = await Promise.all(items.map((item) => listStockEvents(item.id)));
 
@@ -33,6 +48,7 @@ export default async function PrizesPage({ params }: { params: Promise<{ classId
       <h1 className="min-w-0 break-words text-xl font-semibold text-workspace-ink">{target?.name} · 奖品与库存</h1>
       <Badge tone="accent">{items.length} 个奖品</Badge>
     </header>
+    <PrizesFilters key={`${search}:${sort}:${order}`} classId={classId} search={search} sort={sort} order={order} />
     <section aria-label="奖品操作" className="flex flex-wrap justify-end gap-2">
       <PrizeImportDialog classId={classId} />
       <CreateDialog title="创建奖品" trigger="创建奖品" triggerIcon={<Plus aria-hidden="true" className="size-4" />} successMessage="奖品已创建">
@@ -60,7 +76,7 @@ export default async function PrizesPage({ params }: { params: Promise<{ classId
             <TableCell className="min-w-[16rem]"><StockHistoryDialog prizeName={item.name} events={histories[index]} /></TableCell>
           </TableRow>)}</TableBody>
         </Table>
-      </div> : <EmptyState title="暂无奖品。" />}
+      </div> : <EmptyState title={search ? '没有符合条件的奖品。' : '暂无奖品。'} description={search ? '调整搜索关键词后重试。' : undefined} />}
     </section>
   </section>;
 }

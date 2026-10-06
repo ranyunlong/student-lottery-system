@@ -195,3 +195,28 @@ test('archives a prize only after confirming in a custom dialog', async () => {
   expect(nativeConfirm).not.toHaveBeenCalled();
   nativeConfirm.mockRestore();
 });
+
+test('uses added-order ascending as the default prize list sorting', async () => {
+  vi.mocked(listPrizes).mockResolvedValue([] as never);
+  render(await PrizesPage({ params: Promise.resolve({ classId: 'class-1' }), searchParams: Promise.resolve({}) }));
+
+  expect(listPrizes).toHaveBeenCalledWith('class-1', { search: '', sort: 'createdAt', order: 'asc' });
+  expect(screen.getByText('暂无奖品。')).toBeInTheDocument();
+});
+
+test('passes prize search and sorting filters through the query form', async () => {
+  vi.mocked(listPrizes).mockResolvedValue([{ id: 'prize-1', name: '文具盒', stock: 8, archived: false }] as never);
+  vi.mocked(listStockEvents).mockResolvedValue([] as never);
+  render(await PrizesPage({
+    params: Promise.resolve({ classId: 'class-1' }),
+    searchParams: Promise.resolve({ q: '  文具  ', sort: 'name', order: 'desc' }),
+  }));
+
+  expect(listPrizes).toHaveBeenCalledWith('class-1', { search: '文具', sort: 'name', order: 'desc' });
+  const filterForm = screen.getByRole('button', { name: '查找' }).closest('form')!;
+  expect(filterForm).toHaveAttribute('action', '/classes/class-1/prizes');
+  expect(filterForm.method).toBe('get');
+  expect(screen.getByRole('searchbox', { name: '搜索奖品名称' })).toHaveValue('文具');
+  expect(screen.getByRole('combobox', { name: '排序方式' })).toHaveTextContent('名称');
+  expect(screen.getByRole('combobox', { name: '排序方向' })).toHaveTextContent('降序');
+});

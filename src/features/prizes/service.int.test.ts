@@ -111,6 +111,22 @@ test('active names are unique and archiving preserves history while allowing reu
   expect((await listPrizes(classId)).filter((prize) => prize.name === 'Reusable')).toHaveLength(2);
 });
 
+test('searches class prizes and sorts by name or added order', async () => {
+  await db.insert(prizes).values([
+    { classId, name: 'Sortable Alpha', stock: 1, createdAt: new Date('2026-01-01T00:00:00Z') },
+    { classId, name: 'Sortable Zeta', stock: 1, createdAt: new Date('2026-01-02T00:00:00Z') },
+    { classId, name: 'Unrelated prize', stock: 1, createdAt: new Date('2026-01-03T00:00:00Z') },
+    { classId: otherClassId, name: 'Sortable Other', stock: 1, createdAt: new Date('2026-01-04T00:00:00Z') },
+  ]);
+
+  const names = async (options: Parameters<typeof listPrizes>[1]) =>
+    (await listPrizes(classId, options)).map((prize) => prize.name);
+
+  expect(await names({ search: ' sortable ', sort: 'createdAt', order: 'asc' })).toEqual(['Sortable Alpha', 'Sortable Zeta']);
+  expect(await names({ search: 'sortable', sort: 'name', order: 'desc' })).toEqual(['Sortable Zeta', 'Sortable Alpha']);
+  expect(await names({ search: 'sortable', sort: 'name' })).toEqual(['Sortable Alpha', 'Sortable Zeta']);
+});
+
 test('failed ledger insertion rolls back the stock update', async () => {
   const id = await createPrize(classId, 'Ledger rollback', 2, teacherId);
   await db.execute(sql.raw(`CREATE FUNCTION task8_reject_stock_event() RETURNS trigger LANGUAGE plpgsql AS $$
