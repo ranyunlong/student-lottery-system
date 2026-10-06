@@ -18,7 +18,7 @@ services:
       start_period: 10s
 
   app:
-    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.5
+    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.6
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
@@ -26,6 +26,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
       BETTER_AUTH_URL: https://${DOMAIN:?DOMAIN is required}
+      BETTER_AUTH_TRUSTED_ORIGINS: https://${DOMAIN:?DOMAIN is required}
       EMBLEM_DIR: /var/lib/student-lottery/emblems
     volumes:
       - emblem-data:/var/lib/student-lottery/emblems
@@ -41,7 +42,7 @@ services:
       start_period: 20s
 
   cleanup:
-    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.5
+    image: registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.6
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
