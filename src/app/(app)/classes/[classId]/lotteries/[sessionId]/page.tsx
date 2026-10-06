@@ -45,13 +45,13 @@ export default async function LotteryLivePage({ params, searchParams }: {
   const candidates = session.studentIds.map((id) => { const student = students.find((item) => item.id === id); const remaining = session.mode === 'student-prize' ? Math.max(0, session.perStudentLimit - (studentWins.get(id) ?? 0)) : (studentWins.has(id) ? 0 : 1); return { id, name: student?.name ?? '未知学生', archived: student?.archived ?? true, remaining }; });
   let stageSession: DrawStageSession;
   if (session.mode === 'student-prize') {
-    stageSession = { sessionId, mode: session.mode, candidates, prizes: session.prizes.map((item) => { const prize = prizes.find((row) => row.id === item.prizeId); return { id: item.prizeId, name: prize?.name ?? '未知奖品', stock: prize?.stock ?? 0, quotaRemaining: Math.max(0, item.quantity - (prizeWins.get(item.prizeId) ?? 0)) }; }), drawsRemaining: session.drawsRemaining, pendingToken: activeRound?.token, pendingStudentId: activeRound?.studentId ?? undefined };
+    stageSession = { sessionId, mode: session.mode, candidates, prizes: session.prizes.map((item) => { const prize = prizes.find((row) => row.id === item.prizeId); return { id: item.prizeId, name: prize?.name ?? '未知奖品', quotaRemaining: Math.max(0, item.quantity - (prizeWins.get(item.prizeId) ?? 0)) }; }), drawsRemaining: session.drawsRemaining, pendingToken: activeRound?.token, pendingStudentId: activeRound?.studentId ?? undefined };
   } else {
     const prize = prizes.find((row) => row.id === session.prizeId);
     const roundsRemaining = Math.max(0, session.roundCount - sessionWins.length);
     const candidateCapacity = candidates.filter((item) => item.remaining > 0 && !item.archived).length;
     const prizeCapacity = prize && !prize.archived ? roundsRemaining : 0;
-    stageSession = { sessionId, mode: session.mode, candidates, prizes: [{ id: session.prizeId, name: prize?.name ?? '未知奖品', stock: prize?.stock ?? 0, quotaRemaining: roundsRemaining }], drawsRemaining: Math.min(prizeCapacity, candidateCapacity), pendingToken: activeRound?.token, pendingStudentId: activeRound?.studentId ?? undefined };
+    stageSession = { sessionId, mode: session.mode, candidates, prizes: [{ id: session.prizeId, name: prize?.name ?? '未知奖品', quotaRemaining: roundsRemaining }], drawsRemaining: Math.min(prizeCapacity, candidateCapacity), pendingToken: activeRound?.token, pendingStudentId: activeRound?.studentId ?? undefined };
   }
   return <section role="region" aria-label="现场抽奖" className={`${styles.screen} fixed inset-0 z-[60] overflow-y-auto`}>
     <div className="mx-auto flex min-h-full w-full max-w-[1440px] flex-col px-4 py-4 sm:px-8 sm:py-6">

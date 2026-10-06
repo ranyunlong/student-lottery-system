@@ -17,7 +17,7 @@ export type DrawStageSession = {
   sessionId?: string;
   mode: 'student-prize' | 'prize-student';
   candidates: { id: number; name: string; remaining: number; archived?: boolean }[];
-  prizes: { id: string; name: string; stock: number; quotaRemaining: number }[];
+  prizes: { id: string; name: string; quotaRemaining: number }[];
   drawsRemaining: number;
   pendingToken?: string;
   pendingStudentId?: number;
@@ -53,11 +53,11 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
   const router = useRouter();
   const availableCandidates = useMemo(() => session.candidates.filter((item) => item.remaining > 0 && !item.archived), [session.candidates]);
   const rollingItems = useMemo(() => session.mode === 'student-prize'
-    ? session.prizes.filter((item) => item.stock > 0 && item.quotaRemaining > 0).map((item) => item.name)
+    ? session.prizes.filter((item) => item.quotaRemaining > 0).map((item) => item.name)
     : availableCandidates.map((item) => item.name), [availableCandidates, session.mode, session.prizes]);
   const fixedPrize = session.mode === 'prize-student' ? session.prizes[0] : undefined;
   const unavailableStudents = availableCandidates.length === 0 || session.drawsRemaining <= 0;
-  const outOfStock = session.prizes.every((item) => item.stock <= 0 || item.quotaRemaining <= 0);
+  const outOfQuota = session.prizes.every((item) => item.quotaRemaining <= 0);
   const [selectedStudent, setSelectedStudent] = useState(session.pendingToken && session.mode === 'student-prize'
     ? String(session.pendingStudentId ?? availableCandidates[0]?.id ?? '')
     : String(availableCandidates[0]?.id ?? ''));
@@ -110,7 +110,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
   }, [playSoundCue, rollingItems, running]);
 
   async function start() {
-    if (busy || running || session.drawsRemaining <= 0 || outOfStock || (session.mode === 'student-prize' && !effectiveSelectedStudent)) return;
+    if (busy || running || session.drawsRemaining <= 0 || outOfQuota || (session.mode === 'student-prize' && !effectiveSelectedStudent)) return;
     setBusy(true); setError('');
     try {
       const started = await actions.start(session.mode === 'student-prize' ? Number(effectiveSelectedStudent) : undefined);
@@ -128,7 +128,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
     } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
   }
 
-  const canStart = !busy && !running && session.drawsRemaining > 0 && !outOfStock
+  const canStart = !busy && !running && session.drawsRemaining > 0 && !outOfQuota
     && (session.mode === 'prize-student' || availableCandidates.some((item) => String(item.id) === effectiveSelectedStudent));
   const slotItems = rollingItems.length ? [
     rollingItems[(tickerIndex + rollingItems.length - 1) % rollingItems.length],
@@ -139,7 +139,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
   return <section aria-labelledby="draw-stage-title" className={immersive ? styles.stage : 'min-w-0 space-y-5'}>
     <header className={immersive ? styles.stageHeading : 'flex flex-wrap items-center justify-between gap-3 border-b border-workspace-line pb-3'}>
       <div className="min-w-0"><h2 id="draw-stage-title" className={immersive ? styles.stageTitle : 'text-lg font-semibold text-workspace-ink'}>现场抽奖</h2></div>
-      <div className="flex flex-wrap items-center justify-end gap-2"><Badge tone={session.drawsRemaining > 0 ? 'accent' : 'neutral'}>剩余次数 {session.drawsRemaining}</Badge>{fixedPrize && <Badge tone={fixedPrize.stock > 0 ? 'success' : 'warning'}>固定奖品库存 {fixedPrize.stock}</Badge>}{immersive && <>
+      <div className="flex flex-wrap items-center justify-end gap-2"><Badge tone={session.drawsRemaining > 0 ? 'accent' : 'neutral'}>剩余次数 {session.drawsRemaining}</Badge>{fixedPrize && <Badge tone={fixedPrize.quotaRemaining > 0 ? 'success' : 'warning'}>固定奖品剩余配额 {fixedPrize.quotaRemaining}</Badge>}{immersive && <>
         <Button type="button" variant="quiet" size="icon" aria-label={soundMuted ? '开启音效' : '静音音效'} aria-pressed={soundMuted} title={soundMuted ? '开启音效' : '静音音效'} onClick={() => setSoundMuted((muted) => !muted)}>
           {soundMuted ? <VolumeX aria-hidden="true" className="size-4" /> : <Volume2 aria-hidden="true" className="size-4" />}
         </Button>
@@ -152,14 +152,14 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
     </header>
     <div className={immersive ? styles.stageLayout : 'grid min-w-0 flex-1 gap-5 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]'}>
       <section aria-labelledby="candidate-title" className={immersive ? styles.candidatePanel : 'min-w-0 space-y-4 rounded-md p-4 sm:p-5'}>
-        <div className="flex items-center justify-between gap-3"><h3 id="candidate-title" className="text-sm font-semibold">候选与库存</h3><span className={immersive ? styles.candidateCount : 'text-sm text-workspace-muted'}>参与人数 {session.candidates.length} 人</span></div>
+        <div className="flex items-center justify-between gap-3"><h3 id="candidate-title" className="text-sm font-semibold">候选与奖品</h3><span className={immersive ? styles.candidateCount : 'text-sm text-workspace-muted'}>参与人数 {session.candidates.length} 人</span></div>
       {session.mode === 'student-prize' ? <Field label="本轮学生" className="max-w-xl">
         <Select id="lottery-student" aria-describedby="candidate-help" value={effectiveSelectedStudent} onChange={(event) => setSelectedStudent(event.target.value)} disabled={running || busy}>
           <option value="">请选择学生</option>{session.candidates.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={candidate.remaining <= 0 || candidate.archived}>{candidate.name}（剩余 {candidate.remaining} 次）</option>)}
         </Select>
       </Field> : <div className="min-h-11 border border-workspace-line bg-workspace-surface px-3 py-3 text-sm font-medium text-workspace-ink">固定奖品：{fixedPrize?.name ?? '暂无奖品'}</div>}
         <div id="candidate-help" className={immersive ? styles.inventory : 'overflow-hidden border-y border-workspace-line'}>
-          <Table><TableHeader><TableRow><TableHead>奖品</TableHead><TableHead>库存</TableHead><TableHead>剩余配额</TableHead></TableRow></TableHeader><TableBody>{session.prizes.map((prize) => <TableRow key={prize.id}><TableCell className="break-words">{prize.name}</TableCell><TableCell>{prize.stock}</TableCell><TableCell>{prize.quotaRemaining}</TableCell></TableRow>)}</TableBody></Table>
+          <Table><TableHeader><TableRow><TableHead>奖品</TableHead><TableHead>剩余配额</TableHead></TableRow></TableHeader><TableBody>{session.prizes.map((prize) => <TableRow key={prize.id}><TableCell className="break-words">{prize.name}</TableCell><TableCell>{prize.quotaRemaining}</TableCell></TableRow>)}</TableBody></Table>
         </div>
       </section>
       <section aria-labelledby="phase-title" className={immersive ? styles.phasePanel : 'flex min-h-64 min-w-0 flex-col rounded-md border border-workspace-line bg-workspace-surface'}>
@@ -180,7 +180,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
       </section>
     </div>
     {unavailableStudents && <StatusMessage role="status" tone="warning"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />没有可用的候选学生或抽奖次数已用尽</StatusMessage>}
-    {outOfStock && <StatusMessage role="status" tone="warning"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />奖品库存已耗尽</StatusMessage>}
+    {outOfQuota && <StatusMessage role="status" tone="warning"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />奖品剩余配额已耗尽</StatusMessage>}
     {session.pendingToken && running && !result && <StatusMessage role="status" tone="info">已恢复进行中的轮次</StatusMessage>}
     {error && <StatusMessage role="alert" tone="error" className="flex-wrap"><span className="min-w-0 flex-1 break-words">{error}</span>{running && <Button type="button" variant="secondary" size="sm" onClick={stop} disabled={busy} icon={busy ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : <RotateCcw aria-hidden="true" className="size-4" />}>重试停止</Button>}</StatusMessage>}
     <div tabIndex={-1} className={immersive ? styles.toolbar : 'flex flex-wrap items-center gap-2 border-t border-workspace-line pt-3'}>

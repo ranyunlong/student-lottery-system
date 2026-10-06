@@ -9,7 +9,7 @@ import { DrawStage, type DrawStageActions, type DrawStageSession } from './draw-
 const session: DrawStageSession = {
   mode: 'student-prize',
   candidates: [{ id: 1, name: '张三', remaining: 1 }],
-  prizes: [{ id: 'p', name: '笔记本', stock: 1, quotaRemaining: 1 }],
+  prizes: [{ id: 'p', name: '笔记本', quotaRemaining: 1 }],
   drawsRemaining: 1,
 };
 type DrawStageResult = Awaited<ReturnType<DrawStageActions['stop']>>;
@@ -80,7 +80,7 @@ test('本轮学生默认选中第一个可用学生并显示参与人数', () =>
   expect(screen.getByText('参与人数 3 人')).toBeVisible();
 });
 
-test('不可用候选人不能开始，库存或次数耗尽时显示原因', async () => {
+test('不可用候选人不能开始，剩余配额或次数耗尽时显示原因', async () => {
   const user = userEvent.setup();
   render(<DrawStage session={{ ...session, candidates: [{ id: 1, name: '张三', remaining: 0 }], drawsRemaining: 0 }} actions={actions()} />);
   await user.click(screen.getByRole('combobox', { name: '本轮学生' }));
@@ -88,8 +88,38 @@ test('不可用候选人不能开始，库存或次数耗尽时显示原因', as
   expect(screen.getByText('没有可用的候选学生或抽奖次数已用尽')).toBeVisible();
 
   cleanup();
-  render(<DrawStage session={{ ...session, prizes: [{ ...session.prizes[0], stock: 0 }] }} actions={actions()} />);
-  expect(screen.getByText('奖品库存已耗尽')).toBeVisible();
+  render(<DrawStage session={{ ...session, prizes: [{ ...session.prizes[0], quotaRemaining: 0 }] }} actions={actions()} />);
+  expect(screen.getByText('奖品剩余配额已耗尽')).toBeVisible();
+});
+
+test('奖品库存已全部预留时仍按本场剩余配额允许抽奖', async () => {
+  const user = userEvent.setup();
+  const api = actions();
+  render(<DrawStage session={{
+    ...session,
+    prizes: [{ id: 'p', name: '笔记本', quotaRemaining: 1 }],
+    drawsRemaining: 1,
+  }} actions={api} />);
+
+  expect(screen.queryByText('奖品库存已耗尽')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '开始抽奖' })).toBeEnabled();
+  await user.click(screen.getByRole('button', { name: '开始抽奖' }));
+
+  expect(api.start).toHaveBeenCalledWith(1);
+  expect(screen.getByRole('button', { name: '停止' })).toBeEnabled();
+});
+
+test('现场奖品列表只显示本场剩余配额', () => {
+  render(<DrawStage session={{
+    ...session,
+    prizes: [{ id: 'p', name: '笔记本', quotaRemaining: 1 }],
+  }} actions={actions()} />);
+
+  const table = screen.getByRole('table');
+  expect(within(table).getByRole('columnheader', { name: '剩余配额' })).toBeVisible();
+  expect(within(table).queryByRole('columnheader', { name: '库存' })).not.toBeInTheDocument();
+  expect(within(table).getByText('笔记本')).toBeVisible();
+  expect(within(table).getByText('1')).toBeVisible();
 });
 
 test('停止网络错误后允许重试且不会重复提交开始或停止', async () => {
@@ -123,7 +153,7 @@ test('刷新后从 pendingToken 恢复，但现场不提供取消轮次入口', 
 });
 
 test('固定奖品模式只允许开始，不显示学生选择器', () => {
-  render(<DrawStage session={{ ...session, mode: 'prize-student', prizes: [{ id: 'p', name: '笔记本', stock: 2, quotaRemaining: 2 }], drawsRemaining: 2 }} actions={actions()} />);
+  render(<DrawStage session={{ ...session, mode: 'prize-student', prizes: [{ id: 'p', name: '笔记本', quotaRemaining: 2 }], drawsRemaining: 2 }} actions={actions()} />);
   expect(screen.queryByLabelText('本轮学生')).not.toBeInTheDocument();
   expect(screen.getByText('固定奖品：笔记本')).toBeVisible();
 });
@@ -195,7 +225,7 @@ test('committed rounds refresh counts and offer another round only while draws r
   const user = userEvent.setup();
   const api = actions({ start: vi.fn(async () => ({ token: 'round-2' })) });
   const initial = { ...session, mode: 'prize-student' as const, drawsRemaining: 2,
-    prizes: [{ ...session.prizes[0], stock: 2, quotaRemaining: 2 }] };
+    prizes: [{ ...session.prizes[0], quotaRemaining: 2 }] };
   const view = render(<DrawStage session={initial} actions={api} />);
 
   await user.click(screen.getByRole('button', { name: '开始抽奖' }));
@@ -229,8 +259,8 @@ test('student-prize mode keeps its chosen student fixed while the prize ticker a
     ...session,
     candidates: [{ id: 1, name: '甲同学', remaining: 1 }, { id: 2, name: '乙同学', remaining: 1 }],
     prizes: [
-      { id: 'p1', name: '画册', stock: 2, quotaRemaining: 2 },
-      { id: 'p2', name: '彩笔', stock: 2, quotaRemaining: 2 },
+      { id: 'p1', name: '画册', quotaRemaining: 2 },
+      { id: 'p2', name: '彩笔', quotaRemaining: 2 },
     ],
   };
   render(<DrawStage session={drawSession} actions={actions()} />);
@@ -249,8 +279,8 @@ test('immersive prize draw rolls prize names in three slot windows and reveals o
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   const user = userEvent.setup();
   const drawSession = { ...session, prizes: [
-    { id: 'p1', name: '画册', stock: 2, quotaRemaining: 2 },
-    { id: 'p2', name: '彩笔', stock: 2, quotaRemaining: 2 },
+    { id: 'p1', name: '画册', quotaRemaining: 2 },
+    { id: 'p2', name: '彩笔', quotaRemaining: 2 },
   ] };
   const api = actions({ stop: vi.fn(async () => ({ winId: 'w', studentId: 1, studentName: '张三', prizeId: 'p2', prizeName: '彩笔' })) });
   render(<DrawStage session={drawSession} actions={api} immersive />);
@@ -273,7 +303,7 @@ test('many prize categories keep the slot stage bounded to three windows', async
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   const user = userEvent.setup();
   const prizes = Array.from({ length: 80 }, (_, index) => ({
-    id: `p${index}`, name: `第${index + 1}种很长的奖品名称`, stock: 1, quotaRemaining: 1,
+    id: `p${index}`, name: `第${index + 1}种很长的奖品名称`, quotaRemaining: 1,
   }));
   render(<DrawStage session={{ ...session, prizes }} actions={actions()} immersive />);
   await chooseStudent(user, '1');
@@ -300,8 +330,8 @@ test('reduced motion keeps the reel readable and stationary while preserving the
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   const user = userEvent.setup();
   const drawSession = { ...session, prizes: [
-    { id: 'p1', name: '画册', stock: 2, quotaRemaining: 2 },
-    { id: 'p2', name: '彩笔', stock: 2, quotaRemaining: 2 },
+    { id: 'p1', name: '画册', quotaRemaining: 2 },
+    { id: 'p2', name: '彩笔', quotaRemaining: 2 },
   ] };
   const api = actions({ stop: vi.fn(async () => ({ winId: 'w', studentId: 1, studentName: '张三', prizeId: 'p2', prizeName: '彩笔' })) });
   render(<DrawStage session={drawSession} actions={api} immersive />);
@@ -343,8 +373,8 @@ test('sound is created for each slot ticker jump, not at start or stop, and can 
     render(<DrawStage session={{
       ...session,
       prizes: [
-        { id: 'p1', name: '画册', stock: 2, quotaRemaining: 2 },
-        { id: 'p2', name: '彩笔', stock: 2, quotaRemaining: 2 },
+        { id: 'p1', name: '画册', quotaRemaining: 2 },
+        { id: 'p2', name: '彩笔', quotaRemaining: 2 },
       ],
     }} actions={actions()} immersive />);
 

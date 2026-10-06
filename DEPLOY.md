@@ -69,10 +69,10 @@ docker login --username=<你的阿里云账号> registry.cn-hangzhou.aliyuncs.co
 docker buildx build --platform linux/amd64 --load -t student-lottery-system-app:latest .
 
 # 打标签
-docker tag student-lottery-system-app:latest registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.10
+docker tag student-lottery-system-app:latest registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.11
 
 # 推送
-docker push registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.10
+docker push registry.cn-hangzhou.aliyuncs.com/geckoai/student-lottery-system-app:v1.0.11
 ```
 
 ---
