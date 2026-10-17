@@ -63,7 +63,7 @@ async function lockedPrizes(tx: Transaction, classId: string, ids: string[]) {
 }
 
 async function studentCandidate(tx: Transaction, classId: string, sessionId: string, studentId: number) {
-  const [candidate] = await tx.select({ usedCount: sessionStudents.usedCount, name: students.name,
+  const [candidate] = await tx.select({ usedCount: sessionStudents.usedCount, drawLimit: sessionStudents.drawLimit, name: students.name,
     number: students.studentNumber, archived: students.archived })
     .from(sessionStudents).innerJoin(students, and(eq(students.id, sessionStudents.studentId), eq(students.classId, classId)))
     .where(and(eq(sessionStudents.sessionId, sessionId), eq(sessionStudents.studentId, studentId)));
@@ -98,7 +98,7 @@ async function hasLegalNextRound(tx: Transaction, classId: string, session: type
     const [candidate] = await tx.select({ id: sessionStudents.studentId }).from(sessionStudents)
       .innerJoin(students, and(eq(students.id, sessionStudents.studentId), eq(students.classId, classId)))
       .where(and(eq(sessionStudents.sessionId, session.id), eq(students.archived, false),
-        sql`${sessionStudents.usedCount} < ${session.studentDrawLimit!}`)).limit(1);
+        sql`${sessionStudents.usedCount} < ${sessionStudents.drawLimit}`)).limit(1);
     if (!candidate) return false;
     const options = await tx.select({ prizeId: sessionPrizes.prizeId, quantityLimit: sessionPrizes.quantityLimit,
       usedCount: sessionPrizes.usedCount }).from(sessionPrizes)
@@ -136,7 +136,7 @@ export async function startRound(sessionId: string, actorId: string, selectedStu
     if (session.mode === 'student_prize') {
       if (!Number.isSafeInteger(selectedStudentId) || !selectedStudentId || selectedStudentId <= 0) throw new UnavailableRoundError('请选择候选学生');
       const candidate = await studentCandidate(tx, classId, sessionId, selectedStudentId);
-      if (candidate.usedCount >= session.studentDrawLimit!) throw new UnavailableRoundError('学生已达到抽取次数上限');
+      if (candidate.usedCount >= candidate.drawLimit) throw new UnavailableRoundError('学生已达到抽取次数上限');
       const options = await tx.select().from(sessionPrizes).where(eq(sessionPrizes.sessionId, sessionId)).orderBy(asc(sessionPrizes.prizeId));
       const inventory = await lockedPrizes(tx, classId, options.map((row) => row.prizeId));
       if (!options.some((item) => item.quantityLimit > item.usedCount
@@ -181,7 +181,7 @@ export async function stopRound(token: string, actorId: string): Promise<DrawRes
     if (session.mode === 'student_prize') {
       if (!round.studentId) throw new UnavailableRoundError('轮次未指定学生');
       const candidate = await studentCandidate(tx, located.classId, session.id, round.studentId);
-      if (candidate.usedCount >= session.studentDrawLimit!) throw new UnavailableRoundError('学生已达到抽取次数上限');
+      if (candidate.usedCount >= candidate.drawLimit) throw new UnavailableRoundError('学生已达到抽取次数上限');
       const options = await tx.select().from(sessionPrizes).where(eq(sessionPrizes.sessionId, session.id)).orderBy(asc(sessionPrizes.prizeId));
       const inventory = await lockedPrizes(tx, located.classId, options.map((item) => item.prizeId));
       prizeId = pickWeightedPrize(options.map((item) => {
@@ -203,6 +203,7 @@ export async function stopRound(token: string, actorId: string): Promise<DrawRes
     }
 
     const candidate = await studentCandidate(tx, located.classId, session.id, studentId);
+    if (session.mode === 'student_prize' && candidate.usedCount >= candidate.drawLimit) throw new UnavailableRoundError('学生已达到抽取次数上限');
     const [prize] = await tx.select().from(prizes).where(eq(prizes.id, prizeId));
     if (!prize || prize.archived) throw new UnavailableRoundError('库存不足或奖品已归档');
     const [record] = await tx.insert(winningRecords).values({ classId: located.classId, sessionId: session.id, roundId: round.id,

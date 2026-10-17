@@ -8,7 +8,7 @@ const { select, getSessionMock, listWinningsMock, requireClassAccessMock, listSt
   requireClassAccessMock: vi.fn(),
   listStudentsMock: vi.fn(),
   listPrizesMock: vi.fn(),
-  DrawStageMock: vi.fn((props: { session?: { drawsRemaining?: number } }) => <div data-draws-remaining={props.session?.drawsRemaining}>现场抽奖阶段</div>),
+  DrawStageMock: vi.fn((props: { session?: { drawsRemaining?: number; candidates?: Array<{ id: number; remaining: number }> } }) => <div data-draws-remaining={props.session?.drawsRemaining}>现场抽奖阶段</div>),
 }));
 
 vi.mock('../../../../../../db/client', () => ({ db: { select } }));
@@ -127,4 +127,32 @@ test('live draw header shows the configured class emblem in the upper-right', as
   expect(emblem).toHaveAttribute('src', '/api/classes/class-1/emblem?v=class-emblem.webp');
   expect(screen.getByRole('banner').firstElementChild).toContainElement(emblem);
   expect(screen.queryByText('指定学生 · 随机奖品')).not.toBeInTheDocument();
+});
+
+
+test('live draw candidates use each student limit when calculating remaining draws', async () => {
+  getSessionMock.mockResolvedValue({
+    id: 'session-individual', classId: 'class-1', title: '分别次数场次', mode: 'student-prize', status: 'active',
+    studentIds: [1, 2], prizes: [{ prizeId: 'prize-1', quantity: 3 }], perStudentLimit: 99,
+    limitMode: 'individual', studentLimits: [{ studentId: 1, limit: 3 }, { studentId: 2, limit: 1 }], drawsRemaining: 2,
+  });
+  const classQuery = { limit: vi.fn().mockResolvedValue([{ name: '二年级一班', emblemPath: null }]) };
+  const classFilter = { where: vi.fn(() => classQuery) };
+  select.mockReturnValue({ from: vi.fn(() => classFilter) });
+  listStudentsMock.mockResolvedValue([
+    { id: 1, name: '学生一', archived: false },
+    { id: 2, name: '学生二', archived: false },
+  ]);
+  listPrizesMock.mockResolvedValue([{ id: 'prize-1', name: '奖品一', stock: 3, archived: false }]);
+  listWinningsMock.mockResolvedValue([{ id: 'win-1', sessionId: 'session-individual', studentId: 1, prizeId: 'prize-1' }, { id: 'win-2', sessionId: 'session-individual', studentId: 2, prizeId: 'prize-1' }]);
+
+  render(await LotteryLivePage({
+    params: Promise.resolve({ classId: 'class-1', sessionId: 'session-individual' }),
+    searchParams: Promise.resolve({}),
+  }));
+
+  expect(DrawStageMock.mock.calls.at(0)?.[0].session?.candidates).toEqual([
+    { id: 1, name: '学生一', archived: false, remaining: 2 },
+    { id: 2, name: '学生二', archived: false, remaining: 0 },
+  ]);
 });

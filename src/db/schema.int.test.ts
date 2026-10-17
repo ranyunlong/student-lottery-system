@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, expect, test } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { pool, db } from './client';
 import { user } from './auth-schema';
 import { classes, lotteryRounds, lotterySessions, prizes, sessionStudents, students, winningRecords } from './schema';
@@ -57,6 +57,35 @@ test('session candidates cannot refer to another class student', async () => {
   const [foreignStudent] = await db.insert(students).values({ classId: foreignClassId, studentNumber: '001', name: '外班学生' }).returning();
   await db.insert(lotterySessions).values({ id: sessionId, classId: localClassId, mode: 'student_prize', createdBy: teacherId });
   await expect(db.insert(sessionStudents).values({ classId: localClassId, sessionId, studentId: foreignStudent.id })).rejects.toThrow();
+});
+
+test('session student draw limits default to one and reject zero or negative values', async () => {
+  const teacherId = randomUUID();
+  const limitClassId = randomUUID();
+  const sessionId = randomUUID();
+  await db.insert(user).values({ id: teacherId, name: '老师', email: `${teacherId}@example.test` });
+  await db.insert(classes).values({ id: limitClassId, name: '次数班' });
+  const [defaultStudent, zeroStudent, negativeStudent] = await db.insert(students).values([
+    { classId: limitClassId, studentNumber: '001', name: '默认次数学生' },
+    { classId: limitClassId, studentNumber: '002', name: '零次学生' },
+    { classId: limitClassId, studentNumber: '003', name: '负数学生' },
+  ]).returning();
+  await db.insert(lotterySessions).values({ id: sessionId, classId: limitClassId, mode: 'student_prize', createdBy: teacherId });
+
+  const [sessionStudent] = await db.insert(sessionStudents).values({
+    classId: limitClassId, sessionId, studentId: defaultStudent.id,
+  }).returning();
+  expect(sessionStudent.drawLimit).toBe(1);
+
+  await expect(db.insert(sessionStudents).values({
+    classId: limitClassId, sessionId, studentId: zeroStudent.id, drawLimit: 0,
+  })).rejects.toThrow();
+  await expect(db.insert(sessionStudents).values({
+    classId: limitClassId, sessionId, studentId: negativeStudent.id, drawLimit: -1,
+  })).rejects.toThrow();
+  const sessionStudentKey = and(eq(sessionStudents.sessionId, sessionId), eq(sessionStudents.studentId, defaultStudent.id));
+  await expect(db.update(sessionStudents).set({ drawLimit: 0 }).where(sessionStudentKey)).rejects.toThrow();
+  await expect(db.update(sessionStudents).set({ drawLimit: -1 }).where(sessionStudentKey)).rejects.toThrow();
 });
 
 test('a winning record must reference a round in its own session', async () => {

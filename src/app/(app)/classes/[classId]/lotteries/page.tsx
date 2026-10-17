@@ -39,7 +39,7 @@ export default async function LotteriesPage({ params }: { params: Promise<{ clas
           return <TableRow key={item.id}>
           <TableCell><span className="sr-only">场次</span><Link href={sessionHref} className="min-w-0 break-words rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-workspace-accent"><span className="block font-semibold">{item.title || modeLabel}</span>{item.title && <span className="block text-sm text-workspace-muted">{modeLabel}</span>}</Link></TableCell>
           <TableCell><span className="sr-only">状态</span><Badge tone={tones[item.status]}>{labels[item.status]}</Badge></TableCell>
-          <TableCell><span className="sr-only">候选范围</span><span className="break-words text-sm">候选学生 {item.studentIds.length} 人 · {item.mode === 'student-prize' ? `候选奖品 ${item.prizes.length} 种 · 每人最多 ${item.perStudentLimit} 次` : `抽取 ${item.roundCount} 轮`}</span></TableCell>
+          <TableCell><span className="sr-only">候选范围</span><span className="break-words text-sm">候选学生 {item.studentIds.length} 人 · {item.mode === 'student-prize' ? `候选奖品 ${item.prizes.length} 种 · ${item.limitMode === 'individual' ? '按学生设置抽取次数' : `每人最多 ${item.perStudentLimit} 次`}` : `抽取 ${item.roundCount} 轮`}</span></TableCell>
           <TableCell><span className="sr-only">操作</span>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               {item.status === 'draft' && <>

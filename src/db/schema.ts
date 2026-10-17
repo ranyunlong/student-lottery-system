@@ -90,11 +90,13 @@ export const sessionStudents = pgTable('session_students', {
   classId: uuid('class_id').notNull(),
   sessionId: uuid('session_id').notNull(),
   studentId: integer('student_id').notNull(),
+  drawLimit: integer('draw_limit').notNull().default(1),
   usedCount: integer('used_count').notNull().default(0),
 }, (t) => [
   primaryKey({ columns: [t.sessionId, t.studentId] }),
   foreignKey({ columns: [t.classId, t.sessionId], foreignColumns: [lotterySessions.classId, lotterySessions.id] }),
   foreignKey({ columns: [t.classId, t.studentId], foreignColumns: [students.classId, students.id] }),
+  check('session_students_draw_limit_positive', sql`${t.drawLimit} > 0`),
   check('session_students_used_nonnegative', sql`${t.usedCount} >= 0`),
 ]);
 

@@ -100,3 +100,35 @@ test('single prize availability is described in draw rounds rather than student 
   render(<PrizeTransferBox single items={[{ id: 'p1', name: '画册', stock: 6 }]} />);
   expect(screen.getByRole('button', { name: '添加 画册' })).toHaveTextContent('最多抽取 6 轮');
 });
+
+test('student limit mode toggle submits copied limits and removes stale student limits', async () => {
+  const user = userEvent.setup();
+  render(<StudentTransferBox
+    items={[{ id: 1, label: 'S001 · 林同学' }, { id: 2, label: 'S002 · 王同学' }]}
+    initialSelectedIds={[1]}
+    initialPerStudentLimit={3}
+  />);
+
+  expect(screen.getByRole('button', { name: '统一设置' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByDisplayValue('3')).toHaveAttribute('name', 'perStudentLimit');
+  await user.click(screen.getByRole('button', { name: '分别设置' }));
+
+  expect(screen.getByRole('button', { name: '分别设置' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByDisplayValue('individual')).toHaveAttribute('name', 'studentLimitMode');
+  expect(screen.getByDisplayValue('3')).toHaveAttribute('name', 'studentLimit:1');
+  const studentOneLimit = screen.getByRole('textbox', { name: '抽取次数 S001 · 林同学' });
+  expect(studentOneLimit).toHaveValue('3');
+  await user.click(screen.getByRole('button', { name: '增加抽取次数 S001 · 林同学' }));
+  expect(studentOneLimit).toHaveValue('4');
+  await user.click(screen.getByRole('button', { name: '减少抽取次数 S001 · 林同学' }));
+  expect(studentOneLimit).toHaveValue('3');
+  await user.click(screen.getByRole('button', { name: '分别设置' }));
+  expect(studentOneLimit).toHaveValue('3');
+
+  await user.click(screen.getByRole('button', { name: '添加 S002 · 王同学' }));
+  expect(document.querySelector<HTMLInputElement>('input[name="studentLimit:2"]')).toHaveValue('1');
+
+  await user.click(screen.getByRole('button', { name: '移除 S001 · 林同学' }));
+  expect(document.querySelector('input[name="studentLimit:1"]')).not.toBeInTheDocument();
+  expect(document.querySelector('input[name="studentLimit:2"]')).toBeInTheDocument();
+});

@@ -85,7 +85,8 @@ export async function seedTeacherSession(options: SessionOptions = {}): Promise<
     fixedPrizeId: mode === 'prize-student' ? prizeId : null,
     roundLimit: mode === 'prize-student' ? rounds : null, createdBy: teacher.id,
   });
-  await db.insert(sessionStudents).values(roster.map((student) => ({ classId, sessionId, studentId: student.id })));
+  await db.insert(sessionStudents).values(roster.map((student) => ({ classId, sessionId, studentId: student.id,
+    drawLimit: mode === 'student-prize' ? options.studentDrawLimit ?? 2 : 1 })));
   if (mode === 'student-prize') {
     await db.insert(sessionPrizes).values({ classId, sessionId, prizeId, quantityLimit: options.prizeQuantity ?? 3 });
   }

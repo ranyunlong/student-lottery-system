@@ -42,7 +42,14 @@ export default async function LotteryLivePage({ params, searchParams }: {
   const studentWins = new Map<number, number>();
   const prizeWins = new Map<string, number>();
   for (const win of sessionWins) { studentWins.set(win.studentId, (studentWins.get(win.studentId) ?? 0) + 1); prizeWins.set(win.prizeId, (prizeWins.get(win.prizeId) ?? 0) + 1); }
-  const candidates = session.studentIds.map((id) => { const student = students.find((item) => item.id === id); const remaining = session.mode === 'student-prize' ? Math.max(0, session.perStudentLimit - (studentWins.get(id) ?? 0)) : (studentWins.has(id) ? 0 : 1); return { id, name: student?.name ?? '未知学生', archived: student?.archived ?? true, remaining }; });
+  const individualLimits = session.mode === 'student-prize' && session.limitMode === 'individual'
+    ? new Map(session.studentLimits?.map((item) => [item.studentId, item.limit])) : undefined;
+  const candidates = session.studentIds.map((id) => {
+    const student = students.find((item) => item.id === id);
+    const limit = session.mode === 'student-prize' ? (individualLimits?.get(id) ?? session.perStudentLimit) : 1;
+    const remaining = Math.max(0, limit - (studentWins.get(id) ?? 0));
+    return { id, name: student?.name ?? '未知学生', archived: student?.archived ?? true, remaining };
+  });
   let stageSession: DrawStageSession;
   if (session.mode === 'student-prize') {
     stageSession = { sessionId, mode: session.mode, candidates, prizes: session.prizes.map((item) => { const prize = prizes.find((row) => row.id === item.prizeId); return { id: item.prizeId, name: prize?.name ?? '未知奖品', quotaRemaining: Math.max(0, item.quantity - (prizeWins.get(item.prizeId) ?? 0)) }; }), drawsRemaining: session.drawsRemaining, pendingToken: activeRound?.token, pendingStudentId: activeRound?.studentId ?? undefined };

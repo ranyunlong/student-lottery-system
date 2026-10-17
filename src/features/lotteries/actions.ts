@@ -28,8 +28,16 @@ function parse(data: FormData): SessionConfig {
   if (mode === 'prize-student') return { mode, title: optionalTitle, studentIds, prizeId: field(data, 'prizeId'), roundCount: integer(field(data, 'roundCount')) };
   if (mode === 'student-prize') {
     const prizeIds = data.getAll('prizeIds').map(String);
+    const limitMode = data.get('studentLimitMode');
+    if (limitMode !== null && limitMode !== 'uniform' && limitMode !== 'individual') throw new Error('学生抽取次数模式无效');
+    const prizes = prizeIds.map((prizeId) => ({ prizeId, quantity: integer(field(data, 'quantity:' + prizeId)) }));
+    if (limitMode === 'individual') {
+      const studentLimits = studentIds.map((studentId) => ({ studentId, limit: integer(field(data, 'studentLimit:' + studentId)) }));
+      const perStudentLimit = Math.max(...studentLimits.map((item) => item.limit));
+      return { mode, title: optionalTitle, studentIds, perStudentLimit, limitMode, studentLimits, prizes };
+    }
     return { mode, title: optionalTitle, studentIds, perStudentLimit: integer(field(data, 'perStudentLimit')),
-      prizes: prizeIds.map((prizeId) => ({ prizeId, quantity: integer(field(data, 'quantity:' + prizeId)) })) };
+      limitMode: 'uniform' as const, prizes };
   }
   throw new Error('抽奖模式无效');
 }

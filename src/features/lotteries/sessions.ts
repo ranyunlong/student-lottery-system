@@ -48,7 +48,15 @@ function validateShape(config: SessionConfig) {
     throw new Error('场次名称不能超过 120 个字符');
   }
   if (config.mode === 'student-prize') {
-    if (!positive(config.perStudentLimit)) throw new Error('每人抽取次数必须是正整数');
+    if (config.limitMode !== undefined && config.limitMode !== 'uniform' && config.limitMode !== 'individual') throw new Error('学生抽取次数模式无效');
+    if (config.limitMode !== 'individual' && !positive(config.perStudentLimit)) throw new Error('每人抽取次数必须是正整数');
+    if (config.limitMode === 'individual') {
+      if (!Array.isArray(config.studentLimits) || config.studentLimits.length !== config.studentIds.length
+        || new Set(config.studentLimits.map((item) => item?.studentId)).size !== config.studentLimits.length
+        || config.studentLimits.some((item) => !item || !config.studentIds.includes(item.studentId) || !positive(item.limit))) {
+        throw new Error('每名学生的抽取次数必须有效');
+      }
+    }
     if (!Array.isArray(config.prizes) || !config.prizes.length || config.prizes.some((item) => !item || !item.prizeId || !positive(item.quantity))
       || new Set(config.prizes.map((item) => item.prizeId)).size !== config.prizes.length) throw new Error('候选奖品及数量无效或重复');
     if (config.prizes.reduce((sum, item) => sum + item.quantity, 0) <= config.studentIds.length) throw new Error('总数量必须大于候选学生数');
@@ -71,6 +79,11 @@ async function validateCandidates(tx: Transaction, classId: string, config: Sess
   } else {
     if (config.roundCount > available[0].stock) throw new Error('库存不足');
   }
+}
+
+function studentLimits(config: Extract<SessionConfig, { mode: 'student-prize' }>) {
+  if (config.limitMode === 'individual') return config.studentLimits!;
+  return config.studentIds.map((studentId) => ({ studentId, limit: config.perStudentLimit }));
 }
 
 async function reserveInventory(tx: Transaction, classId: string, sessionId: string, config: SessionConfig, actorId: string) {
@@ -108,12 +121,13 @@ export async function releaseSessionInventory(tx: Transaction, session: typeof l
 async function persist(tx: Transaction, id: string, classId: string, config: SessionConfig) {
   const title = config.title?.trim() || null;
   await tx.update(lotterySessions).set({ title, mode: config.mode === 'student-prize' ? 'student_prize' : 'prize_student',
-    studentDrawLimit: config.mode === 'student-prize' ? config.perStudentLimit : null,
+    studentDrawLimit: config.mode === 'student-prize' && config.limitMode !== 'individual' ? config.perStudentLimit : null,
     fixedPrizeId: config.mode === 'prize-student' ? config.prizeId : null,
     roundLimit: config.mode === 'prize-student' ? config.roundCount : null }).where(eq(lotterySessions.id, id));
   await tx.delete(sessionPrizes).where(eq(sessionPrizes.sessionId, id));
   await tx.delete(sessionStudents).where(eq(sessionStudents.sessionId, id));
-  await tx.insert(sessionStudents).values(config.studentIds.map((studentId) => ({ classId, sessionId: id, studentId })));
+  const limits = config.mode === 'student-prize' ? studentLimits(config) : config.studentIds.map((studentId) => ({ studentId, limit: 1 }));
+  await tx.insert(sessionStudents).values(limits.map(({ studentId, limit }) => ({ classId, sessionId: id, studentId, drawLimit: limit })));
   if (config.mode === 'student-prize') await tx.insert(sessionPrizes).values(config.prizes.map((item) => ({ classId, sessionId: id, prizeId: item.prizeId, quantityLimit: item.quantity })));
 }
 
@@ -148,13 +162,15 @@ export async function updateDraftSession(sessionId: string, config: SessionConfi
 }
 
 async function readConfig(tx: Transaction, sessionId: string, row: typeof lotterySessions.$inferSelect): Promise<SessionConfig> {
-  const candidates = await tx.select({ studentId: sessionStudents.studentId }).from(sessionStudents)
+  const candidates = await tx.select({ studentId: sessionStudents.studentId, drawLimit: sessionStudents.drawLimit }).from(sessionStudents)
     .where(eq(sessionStudents.sessionId, sessionId)).orderBy(asc(sessionStudents.studentId));
   const studentIds = candidates.map((item) => item.studentId);
   if (row.mode === 'prize_student') return { mode: 'prize-student', studentIds, prizeId: row.fixedPrizeId!, roundCount: row.roundLimit! };
   const options = await tx.select({ prizeId: sessionPrizes.prizeId, quantity: sessionPrizes.quantityLimit }).from(sessionPrizes)
     .where(eq(sessionPrizes.sessionId, sessionId)).orderBy(asc(sessionPrizes.prizeId));
-  return { mode: 'student-prize', studentIds, prizes: options, perStudentLimit: row.studentDrawLimit! };
+  if (row.studentDrawLimit != null) return { mode: 'student-prize', studentIds, prizes: options, perStudentLimit: row.studentDrawLimit, limitMode: 'uniform' };
+  const studentLimits = candidates.map(({ studentId, drawLimit }) => ({ studentId, limit: drawLimit }));
+  return { mode: 'student-prize', studentIds, prizes: options, perStudentLimit: Math.max(...studentLimits.map((item) => item.limit)), limitMode: 'individual', studentLimits };
 }
 
 export async function activateSession(sessionId: string): Promise<void> {
@@ -213,10 +229,9 @@ async function readSession(tx: Transaction, sessionId: string): Promise<SessionV
   const config = await readConfig(tx, sessionId, row);
   let drawsRemaining: number;
   if (config.mode === 'student-prize') {
-    const usage = await tx.select({ usedCount: sessionStudents.usedCount }).from(sessionStudents)
+    const usage = await tx.select({ usedCount: sessionStudents.usedCount, drawLimit: sessionStudents.drawLimit }).from(sessionStudents)
       .where(eq(sessionStudents.sessionId, sessionId));
-    drawsRemaining = Math.max(0, config.studentIds.length * config.perStudentLimit
-      - usage.reduce((total, item) => total + item.usedCount, 0));
+    drawsRemaining = usage.reduce((total, item) => total + Math.max(0, item.drawLimit - item.usedCount), 0);
   } else {
     const winners = await tx.select({ id: winningRecords.id }).from(winningRecords)
       .where(eq(winningRecords.sessionId, sessionId));

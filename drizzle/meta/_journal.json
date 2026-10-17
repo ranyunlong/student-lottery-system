@@ -57,6 +57,13 @@
       "when": 1790743075979,
       "tag": "0007_add_lottery_session_title",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792206936135,
+      "tag": "0008_add_session_student_draw_limit",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import SessionSetupPage from './page';
+import { getSession } from '../../../../../../features/lotteries/sessions';
 import { listPrizes } from '../../../../../../features/prizes/service';
 import { listStudents } from '../../../../../../features/students/service';
 
@@ -15,7 +16,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn(), push: 
 afterEach(cleanup);
 
 test('switching lottery mode keeps the draft session id in the URL', async () => {
-  vi.mocked(listStudents).mockResolvedValue([] as never);
+  vi.mocked(listStudents).mockResolvedValue([{ id: 42, studentNumber: 'S042', name: '林同学', archived: false }] as never);
   vi.mocked(listPrizes).mockResolvedValue([] as never);
   render(await SessionSetupPage({
     params: Promise.resolve({ classId: 'class-1' }),
@@ -99,15 +100,68 @@ test('fixed prize shows its inventory as the maximum available draw rounds', asy
   expect(screen.getByLabelText('抽取轮数')).toHaveAttribute('max', '2147483647');
 });
 
-test('per-student draw limit sits beside the create action and wraps on narrow layouts', async () => {
+test('student draw limit controls sit inside the candidate student area', async () => {
   vi.mocked(listStudents).mockResolvedValue([{ id: 42, studentNumber: 'S042', name: '林同学', archived: false }] as never);
   vi.mocked(listPrizes).mockResolvedValue([{ id: 'p1', name: '画册', stock: 6, archived: false }] as never);
   render(await SessionSetupPage({ params: Promise.resolve({ classId: 'class-1' }), searchParams: Promise.resolve({ mode: 'student-prize' }) }));
 
   const limit = screen.getByLabelText('每人最多抽取次数');
-  const field = limit.parentElement?.parentElement;
-  const submit = screen.getByRole('button', { name: '创建并进入现场抽奖' });
-  expect(field?.nextElementSibling).toBe(submit);
-  expect(field).toHaveClass('w-64', 'max-w-full');
-  expect(submit.closest('form')).toHaveClass('flex-wrap');
+  expect(limit.closest('[data-testid="student-transfer-box"]')).not.toBeNull();
+  expect(screen.getByRole('button', { name: '统一设置' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('restores individual student limits when editing a draft', async () => {
+  vi.mocked(listStudents).mockResolvedValue([
+    { id: 42, classId: 'class-1', studentNumber: 'S042', name: '林同学', gender: null, archived: false, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') },
+    { id: 43, classId: 'class-1', studentNumber: 'S043', name: '王同学', gender: null, archived: false, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') },
+  ] as never);
+  vi.mocked(listPrizes).mockResolvedValue([{ id: 'p1', classId: 'class-1', name: '画册', stock: 6, archived: false, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') }] as never);
+  vi.mocked(getSession).mockResolvedValue({
+    id: 'draft-1', classId: 'class-1', title: '春季抽奖', mode: 'student-prize', status: 'draft',
+    studentIds: [42, 43], prizes: [{ prizeId: 'p1', quantity: 3 }], perStudentLimit: 5,
+    limitMode: 'individual', studentLimits: [{ studentId: 42, limit: 2 }, { studentId: 43, limit: 5 }], drawsRemaining: 7,
+    createdAt: new Date('2026-09-29T00:00:00Z'), startedAt: null, completedAt: null,
+  } as never);
+
+  render(await SessionSetupPage({
+    params: Promise.resolve({ classId: 'class-1' }),
+    searchParams: Promise.resolve({ mode: 'student-prize', sessionId: 'draft-1' }),
+  }));
+
+  expect(screen.getByRole('button', { name: '分别设置' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByDisplayValue('2')).toHaveAttribute('name', 'studentLimit:42');
+  expect(screen.getByDisplayValue('5')).toHaveAttribute('name', 'studentLimit:43');
+});
+
+
+
+
+test('restores archived selected students in a draft with individual limits', async () => {
+  vi.mocked(listStudents).mockResolvedValue([
+    { id: 42, classId: 'class-1', studentNumber: 'S042', name: '林同学', gender: null, archived: false, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') },
+    { id: 43, classId: 'class-1', studentNumber: 'S043', name: '王同学', gender: null, archived: true, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') },
+  ] as never);
+  vi.mocked(listPrizes).mockResolvedValue([{ id: 'p1', classId: 'class-1', name: '画册', stock: 6, archived: false, createdAt: new Date('2026-09-29T00:00:00Z'), updatedAt: new Date('2026-09-29T00:00:00Z') }] as never);
+  vi.mocked(getSession).mockResolvedValue({
+    id: 'draft-archived', classId: 'class-1', title: '春季抽奖', mode: 'student-prize', status: 'draft',
+    studentIds: [42, 43], prizes: [{ prizeId: 'p1', quantity: 3 }], perStudentLimit: 5,
+    limitMode: 'individual', studentLimits: [{ studentId: 42, limit: 2 }, { studentId: 43, limit: 5 }], drawsRemaining: 7,
+    createdAt: new Date('2026-09-29T00:00:00Z'), startedAt: null, completedAt: null,
+  } as never);
+
+  render(await SessionSetupPage({
+    params: Promise.resolve({ classId: 'class-1' }),
+    searchParams: Promise.resolve({ mode: 'student-prize', sessionId: 'draft-archived' }),
+  }));
+
+  expect(screen.getByRole('button', { name: /移除 S043 · 王同学.*已归档/ })).toBeInTheDocument();
+  expect(screen.getByDisplayValue('5')).toHaveAttribute('name', 'studentLimit:43');
+});
+test('fixed prize mode does not show student limit controls', async () => {
+  vi.mocked(listStudents).mockResolvedValue([{ id: 42, studentNumber: 'S042', name: '林同学', archived: false }] as never);
+  vi.mocked(listPrizes).mockResolvedValue([{ id: 'p1', name: '画册', stock: 6, archived: false }] as never);
+  render(await SessionSetupPage({ params: Promise.resolve({ classId: 'class-1' }), searchParams: Promise.resolve({ mode: 'prize-student' }) }));
+
+  expect(screen.queryByRole('button', { name: '统一设置' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '分别设置' })).not.toBeInTheDocument();
 });

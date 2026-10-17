@@ -362,3 +362,22 @@ test.each(['start', 'cancel'] as const)('%s waiting on class lock rechecks revok
   expect(rounds).toHaveLength(kind === 'start' ? 0 : 1);
   if (pending) expect(rounds[0].status).toBe('active');
 }, 15000);
+
+test('individual student-prize limits govern each student independently', async () => {
+  const f = await fixture(5);
+  const sessionId = await createSession(f.classId, {
+    mode: 'student-prize', studentIds: [f.a.id, f.b.id], prizes: [{ prizeId: f.prize.id, quantity: 4 }],
+    perStudentLimit: 3, limitMode: 'individual', studentLimits: [{ studentId: f.a.id, limit: 1 }, { studentId: f.b.id, limit: 3 }],
+  });
+  await activateSession(sessionId);
+
+  const firstA = await startRound(sessionId, teacherId, f.a.id);
+  await stopRound(firstA.token, teacherId);
+  await expect(startRound(sessionId, teacherId, f.a.id)).rejects.toThrow('学生已达到抽取次数上限');
+
+  for (let index = 0; index < 3; index++) {
+    const round = await startRound(sessionId, teacherId, f.b.id);
+    await stopRound(round.token, teacherId);
+  }
+  expect((await db.select({ status: lotterySessions.status }).from(lotterySessions).where(eq(lotterySessions.id, sessionId)))[0].status).toBe('completed');
+});

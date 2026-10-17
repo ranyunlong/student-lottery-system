@@ -311,3 +311,44 @@ test.each(['single', 'list'] as const)('%s read cannot outlive a committed teach
   expect(view).toMatchObject({ id: sessionId, studentIds: [candidate], prizes: [{ prizeId: reward, quantity: 2 }] });
   expect(await db.select().from(classTeachers).where(and(eq(classTeachers.classId, id), eq(classTeachers.teacherId, teacherId)))).toEqual([]);
 }, 15000);
+
+test('individual student-prize limits persist per student and restore from a draft', async () => {
+  await db.update(prizes).set({ stock: 8 }).where(eq(prizes.id, prizeId));
+  const id = await createSession(classId, {
+    mode: 'student-prize', studentIds: [a, b], prizes: [{ prizeId, quantity: 4 }],
+    perStudentLimit: 3, limitMode: 'individual', studentLimits: [{ studentId: a, limit: 1 }, { studentId: b, limit: 3 }],
+  });
+
+  expect(await db.select({ drawLimit: sessionStudents.drawLimit }).from(sessionStudents)
+    .where(eq(sessionStudents.sessionId, id)).orderBy(sessionStudents.studentId)).toEqual([{ drawLimit: 1 }, { drawLimit: 3 }]);
+  expect((await db.select({ studentDrawLimit: lotterySessions.studentDrawLimit }).from(lotterySessions)
+    .where(eq(lotterySessions.id, id)))[0].studentDrawLimit).toBeNull();
+  expect(await getSession(id)).toMatchObject({
+    status: 'draft', limitMode: 'individual', perStudentLimit: 3,
+    studentLimits: [{ studentId: a, limit: 1 }, { studentId: b, limit: 3 }], drawsRemaining: 4,
+  });
+
+  await updateDraftSession(id, {
+    mode: 'student-prize', studentIds: [a, b], prizes: [{ prizeId, quantity: 4 }],
+    perStudentLimit: 2, limitMode: 'individual', studentLimits: [{ studentId: a, limit: 2 }, { studentId: b, limit: 2 }],
+  });
+  expect(await getSession(id)).toMatchObject({
+    limitMode: 'individual', perStudentLimit: 2,
+    studentLimits: [{ studentId: a, limit: 2 }, { studentId: b, limit: 2 }], drawsRemaining: 4,
+  });
+});
+
+test('individual limit form fields are parsed and persisted by the server action', async () => {
+  cookie = adminCookie;
+  await db.update(prizes).set({ stock: 8 }).where(eq(prizes.id, prizeId));
+  const data = new FormData();
+  data.set('classId', classId); data.set('mode', 'student-prize'); data.set('studentLimitMode', 'individual');
+  data.append('studentIds', String(a)); data.append('studentIds', String(b));
+  data.set('studentLimit:' + a, '1'); data.set('studentLimit:' + b, '3');
+  data.append('prizeIds', prizeId); data.set('quantity:' + prizeId, '4');
+  const result = await saveSessionAction(data);
+  expect(result, result.message).toMatchObject({ ok: true, sessionId: expect.any(String) });
+  const id = result.sessionId!;
+  expect(await getSession(id)).toMatchObject({ limitMode: 'individual', perStudentLimit: 3,
+    studentLimits: [{ studentId: a, limit: 1 }, { studentId: b, limit: 3 }] });
+});

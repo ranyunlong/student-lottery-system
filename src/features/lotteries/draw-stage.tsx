@@ -105,7 +105,7 @@ export function DrawStage({ session, actions, immersive = false }: Props) {
     const interval = window.setInterval(() => {
       setTickerIndex((current) => (current + 1) % rollingItems.length);
       playSoundCue(620);
-    }, 520);
+    }, 260);
     return () => window.clearInterval(interval);
   }, [playSoundCue, rollingItems, running]);
 
@@ -201,4 +201,3 @@ export function ProductionDrawStage({ session }: { session: DrawStageSession }) 
   };
   return <DrawStage session={session} actions={actions} immersive />;
 }
-

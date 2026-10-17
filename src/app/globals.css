@@ -471,3 +471,161 @@ button:disabled,
 @media (prefers-reduced-motion: reduce) {
   [data-workspace-role="teacher"] *, [data-workspace-role="teacher"] *::before, [data-workspace-role="teacher"] *::after { scroll-behavior: auto; }
 }
+
+/* Legacy Chrome fallbacks: keep the current visual system when newer CSS
+   color, viewport, transform, or selector features are unavailable. */
+@supports not (color: color-mix(in srgb, black, white)) {
+  .bg-workspace-accent-soft\/60 {
+    background-color: rgba(255, 240, 231, 0.6);
+  }
+
+  .hover\:bg-workspace-accent-soft\/55:hover {
+    background-color: rgba(255, 240, 231, 0.55);
+  }
+
+  .hover\:bg-workspace-accent-soft\/60:hover {
+    background-color: rgba(255, 240, 231, 0.6);
+  }
+
+  .hover\:bg-workspace-danger\/90:hover {
+    background-color: rgba(180, 35, 24, 0.9);
+  }
+
+  .bg-workspace-ink\/40 {
+    background-color: rgba(28, 25, 23, 0.4);
+  }
+
+  .bg-workspace-surface-alt\/55 {
+    background-color: rgba(245, 245, 244, 0.55);
+  }
+
+  .bg-workspace-surface-alt\/70 {
+    background-color: rgba(245, 245, 244, 0.7);
+  }
+
+  .border-white\/15 {
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+
+  .border-workspace-accent\/20 {
+    border-color: rgba(255, 107, 53, 0.2);
+  }
+
+  .border-workspace-accent\/30 {
+    border-color: rgba(255, 107, 53, 0.3);
+  }
+
+  .border-workspace-danger\/20 {
+    border-color: rgba(180, 35, 24, 0.2);
+  }
+
+  .border-workspace-info\/20 {
+    border-color: rgba(36, 139, 131, 0.2);
+  }
+
+  .border-workspace-info\/25 {
+    border-color: rgba(36, 139, 131, 0.25);
+  }
+
+  .border-workspace-success\/20 {
+    border-color: rgba(22, 112, 75, 0.2);
+  }
+
+  .border-workspace-warm\/30 {
+    border-color: rgba(232, 197, 54, 0.3);
+  }
+
+  .focus-visible\:ring-workspace-accent\/20:focus-visible {
+    --tw-ring-color: rgba(255, 107, 53, 0.2);
+  }
+
+  .aria-invalid\:ring-workspace-danger\/15[aria-invalid="true"] {
+    --tw-ring-color: rgba(180, 35, 24, 0.15);
+  }
+
+  .text-white\/65 {
+    color: rgba(255, 255, 255, 0.65);
+  }
+
+  .text-white\/70 {
+    color: rgba(255, 255, 255, 0.7);
+  }
+}
+
+@supports not (translate: 0 0) {
+  .-translate-x-1\/2 {
+    transform: translateX(-50%);
+  }
+
+  .-translate-y-1\/2 {
+    transform: translateY(-50%);
+  }
+
+  .-translate-x-1\/2.-translate-y-1\/2 {
+    transform: translate(-50%, -50%);
+  }
+
+  .hover\:-translate-y-px:hover {
+    transform: translateY(-1px);
+  }
+
+  .group:hover .group-hover\:-translate-y-px {
+    transform: translateY(-1px);
+  }
+}
+
+@supports not (height: 100dvh) {
+  .max-h-\[calc\(100dvh-2rem\)\] {
+    max-height: calc(100vh - 2rem);
+  }
+
+  .max-h-\[calc\(100dvh-12rem\)\] {
+    max-height: calc(100vh - 12rem);
+  }
+
+  .min-h-dvh {
+    min-height: 100vh;
+  }
+}
+
+@supports not (overflow: clip) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+}
+
+@supports not (scale: 1) {
+  @keyframes ui-dialog-in {
+    from {
+      opacity: 0;
+      transform: scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes ui-dialog-out {
+    from {
+      opacity: 1;
+      transform: scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: scale(0.985);
+    }
+  }
+
+  @keyframes route-enter {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}

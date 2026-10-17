@@ -98,3 +98,23 @@ test('does not save an individual prize quantity above its available stock', asy
   expect(await screen.findByRole('alert')).toHaveTextContent('奖品配置数量不能超过可用库存');
   expect(saveSessionAction).not.toHaveBeenCalled();
 });
+
+test('passes the selected student limit fields to the save action', async () => {
+  vi.mocked(saveSessionAction).mockResolvedValue({ ok: false, message: '已捕获' });
+  const user = userEvent.setup();
+  render(<SessionSetupForm classId="class-1" mode="student-prize">
+    <input name="studentIds" value="42" readOnly />
+    <input name="studentLimitMode" value="individual" readOnly />
+    <input name="studentLimit:42" value="3" readOnly />
+    <input name="prizeIds" value="p1" readOnly />
+    <input name="quantity:p1" value="2" readOnly />
+    <input name="stock:p1" value="3" readOnly />
+  </SessionSetupForm>);
+
+  await user.click(screen.getByRole('button', { name: '创建并进入现场抽奖' }));
+
+  const submitted = vi.mocked(saveSessionAction).mock.calls[0]?.[0];
+  expect(submitted).toBeInstanceOf(FormData);
+  expect(submitted?.get('studentLimitMode')).toBe('individual');
+  expect(submitted?.get('studentLimit:42')).toBe('3');
+});

@@ -64,3 +64,16 @@ test('completed sessions link to their detail and results page', async () => {
   expect(within(row).getByRole('link', { name: /指定奖品 · 随机学生/ })).toHaveAttribute('href', '/classes/class-1/lotteries/session-done?view=results');
   expect(within(row).getByRole('link', { name: /查看中奖记录/ })).toHaveAttribute('href', '/classes/class-1/lotteries/session-done?view=results');
 });
+
+test('shows individual student draw limits in the candidate summary', async () => {
+  vi.mocked(listSessions).mockResolvedValue([{
+    id: 'session-individual', title: '分学生次数场次', mode: 'student-prize', status: 'draft',
+    studentIds: [1, 2], prizes: [{ prizeId: 'p1', quantity: 2 }], perStudentLimit: 1,
+    limitMode: 'individual', studentLimits: [{ studentId: 1, limit: 2 }, { studentId: 2, limit: 4 }],
+  }] as never);
+  render(await LotteriesPage({ params: Promise.resolve({ classId: 'class-1' }) }));
+
+  const row = screen.getByRole('row', { name: /分学生次数场次/ });
+  expect(row).toHaveTextContent('按学生设置抽取次数');
+  expect(within(row).queryByText(/每人最多/)).not.toBeInTheDocument();
+});

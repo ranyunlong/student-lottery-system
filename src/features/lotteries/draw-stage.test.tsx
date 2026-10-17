@@ -383,10 +383,10 @@ test('sound is created for each slot ticker jump, not at start or stop, and can 
     await act(async () => {});
     expect(audioContext).not.toHaveBeenCalled();
 
-    await act(async () => { vi.advanceTimersByTime(520); });
+    await act(async () => { vi.advanceTimersByTime(260); });
     expect(audioContext).toHaveBeenCalledTimes(1);
     expect(oscillator.start).toHaveBeenCalledTimes(1);
-    await act(async () => { vi.advanceTimersByTime(520); });
+    await act(async () => { vi.advanceTimersByTime(260); });
     expect(audioContext).toHaveBeenCalledTimes(2);
     expect(oscillator.start).toHaveBeenCalledTimes(2);
 
@@ -399,7 +399,7 @@ test('sound is created for each slot ticker jump, not at start or stop, and can 
     fireEvent.click(screen.getByRole('button', { name: '静音音效' }));
     fireEvent.click(screen.getByRole('button', { name: '下一轮' }));
     await act(async () => {});
-    await act(async () => { vi.advanceTimersByTime(520); });
+    await act(async () => { vi.advanceTimersByTime(260); });
     expect(audioContext).toHaveBeenCalledTimes(2);
     expect(oscillator.start).toHaveBeenCalledTimes(2);
   } finally {
